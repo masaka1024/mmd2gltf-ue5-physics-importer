@@ -1,0 +1,39 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "MMD Physics Importer",
+	"Description": "mmd2gltf-gui が出力した .glb の extras.mmd から MMD の剛体・ジョイントを読み、自作 Bullet 互換エンジンでスケルタルメッシュのボーンを駆動します。UE の Chaos PhysicsAsset は使用しません。",
+	"Category": "Animation",
+	"CreatedBy": "masaka1024",
+	"CreatedByURL": "https://github.com/masaka1024",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "https://github.com/masaka1024",
+	"CanContainContent": true,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "MmdPhysicsCore",
+			"Type": "Runtime",
+			"LoadingPhase": "PreDefault"
+		},
+		{
+			"Name": "MmdPhysicsRuntime",
+			"Type": "Runtime",
+			"LoadingPhase": "PreDefault"
+		},
+		{
+			"Name": "MmdPhysicsAnimGraph",
+			"Type": "UncookedOnly",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "MmdPhysicsEditor",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		}
+	]
+}

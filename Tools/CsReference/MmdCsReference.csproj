@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    検証A (数値パリティ) の基準出力を作るハーネス。
+
+    ★移植元 C# を「コピーせずリンクして」ビルドする。
+      コピーを置くと upstream の更新と静かにずれるため。
+      .upstream/unity は docs/porting_notes.md の手順で clone したもの (コミット固定)。
+
+    移植元の Core / Pmx は UnityEngine 非依存だが、MathTypes.cs だけが
+    UnityEngine.Vector3 / Matrix4x4 との explicit operator を持つ。
+    そこは UnityShim.cs の最小定義で満たし、移植元は 1 行も書き換えない。
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>MmdCsReference</AssemblyName>
+    <RootNamespace>MmdCsReference</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="UnityShim.cs" />
+    <Compile Include="Program.cs" />
+    <Compile Include="..\..\.upstream\unity\Assets\MMD_Scripts\MmdPhysics\Core\*.cs" />
+    <Compile Include="..\..\.upstream\unity\Assets\MMD_Scripts\MmdPhysics\Pmx\*.cs" />
+  </ItemGroup>
+
+</Project>

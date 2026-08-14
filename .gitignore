@@ -1,0 +1,29 @@
+# 移植元リポジトリの作業用クローン。追跡しない。
+# 取得方法は docs/porting_notes.md を参照。
+/.upstream/
+
+# Unreal Engine のビルド生成物
+Binaries/
+Build/
+Intermediate/
+DerivedDataCache/
+Saved/
+*.sln
+*.suo
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.opendb
+.vs/
+.vscode/
+
+# .NET (Tools/CsReference)
+obj/
+bin/
+# 基準 CSV は実モデルから生成するもの。再配布しない。
+/Tools/CsReference/out/
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
