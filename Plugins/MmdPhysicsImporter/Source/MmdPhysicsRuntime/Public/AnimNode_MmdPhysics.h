@@ -56,12 +56,32 @@ struct MMDPHYSICSRUNTIME_API FAnimNode_MmdPhysics : public FAnimNode_SkeletalCon
 	UPROPERTY(EditAnywhere, Category = "Solver", meta = (ClampMin = "1"))
 	int32 SolverIterations = 10;
 
-	/** 実効刻み = FixedTimeStep / SubSteps。既定 (1/30)/4 = 1/120。 */
+	/**
+	 * 実効刻み = FixedTimeStep / SubSteps。既定 (1/60)/2 = 1/120。
+	 * 細刻み化は SubSteps 側で行うこと (下の FixedTimeStep の注記を参照)。
+	 */
 	UPROPERTY(EditAnywhere, Category = "Solver", meta = (ClampMin = "1"))
-	int32 SubSteps = 4;
+	int32 SubSteps = 2;
 
+	/**
+	 * ★1/60 のまま触らないこと。細刻みが欲しいときは SubSteps を増やす。
+	 *
+	 * 移植元 MmdPhysicsBehaviour.cs の既定に合わせている (2026-08-09 のジャダー調査で
+	 * 1/30×2サブ から 1/60×1サブ へ、2026-08-13 に貫入対策で 1/60×2サブ へ)。
+	 * 実効刻みは 1/120 で MmdPhysics::PhysicsWorld の既定 (1/30×4) と同じだが、
+	 * 「1 フレームに何ステップ進むか」が違う。
+	 *
+	 * PhysicsWorld はアキュムレータ方式なので、FixedTimeStep がフレーム間隔より長いと
+	 * 1 フレームあたりの内部ステップが 0,1,0,1,1,... と変動する。物理の進む量は合っていても
+	 * 実時間の更新間隔が 20ms/40ms とばらつくので、髪やスカートがコマ落ちして見える。
+	 * 60fps 想定で 1/60 にしておくと毎フレームちょうど 1 ステップ進み、間隔が揃う。
+	 * (移植元は Time.fixedDeltaTime と一致させることで同じ状態を作っていた。UE の
+	 *  Post-Process AnimBP は可変フレームレートで評価されるため厳密な等間隔にはならないが、
+	 *  刻みがフレーム間隔以下なら取りこぼしが出ないぶんばらつきは小さくなる。)
+	 * 実機でも 1/30 のままだと髪・スカートの揺れが移植元より大きく荒れて見えた。
+	 */
 	UPROPERTY(EditAnywhere, Category = "Solver", meta = (ClampMin = "0.0001"))
-	float FixedTimeStep = 1.0f / 30.0f;
+	float FixedTimeStep = 1.0f / 60.0f;
 
 	// --- 書き戻しの補正 ---
 
