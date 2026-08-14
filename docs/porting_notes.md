@@ -73,6 +73,27 @@ git clone --depth 1 https://github.com/masaka1024/mmd2gltf-unity-physics-importe
 ★`FixedTimeStep` は 1/60 のまま触らないこと。細刻みが欲しいときは `SubSteps` を増やします
 （移植元 `MmdPhysicsBehaviour.cs` の注記と同じ方針）。
 
+## 半透明の扱い（lilToon → UE マテリアル）
+
+移植元 `Editor/MmdPhysicsImporterWindow.cs` の lilToon 設定を UE へ写した対応表です。
+
+| 移植元 | UE 版 |
+|---|---|
+| `alphaMode` OPAQUE/MASK → RenderingMode 0/1 | `M_MmdToon`（`BLEND_Masked`）。OPAQUE はインスタンスで `OpacityMaskClipValue=0`、MASK は 0.333 |
+| `alphaMode` BLEND → RenderingMode 2 | `M_MmdToonTranslucent`（`BLEND_Translucent`）。アルファは `MP_Opacity` へ |
+| `renderQueue`: mask 由来の昇格組 → AlphaTest 帯 | 不要。Masked は不透明パスなので必ず半透明より先に描かれる |
+| `renderQueue`: 真の半透明 → `3000 + slotIdx` | 不要。UE の半透明ソートキーは `Priority(16) → Distance(32) → MeshIdInPrimitive(16)` で、同一プリミティブのセクションは前 2 つが同値になるため最下位のセクション順（= スロット順）で決まる |
+| TransparentMode = TwoPass（深度書き込みプリパス） | 相当機能なし。**未対応**（README の既知の制限） |
+| `origTexture` によるプリベイク前テクスチャの差し替えと MASK→BLEND 昇格 | **未対応**。GLB バイナリからのテクスチャ抽出を実装していない |
+
+ブレンドモードは UE ではマテリアル単位の静的スイッチなので、1 枚のマスターでは両立できません
+（インスタンスの `BasePropertyOverrides` で上書きするとインスタンスごとに静的 permutation が増え、
+かつ Masked 用グラフには `Opacity` 入力が繋がっていないので不透明になります）。
+そのためマスターを 2 枚生成し、`alphaMode` で親を選ぶ形にしています。
+
+★`TranslucencySortPriority` は `UMaterialInterface` ではなく `UPrimitiveComponent` のプロパティで、
+1 コンポーネントに 1 個しかありません。スロット単位の並び替えには使えないため、インポーターからは触りません。
+
 ## 移植で数値がずれる箇所（対処済み）
 
 翻訳としては自然に見えるのに、数値が食い違う原因になる箇所です。
@@ -183,9 +204,11 @@ $env:MMD_CONV_SKELMESH = "/Game/IA/IA"
 | `MmdPhysics.Core.Equilibrium` | 拘束が保持され Baumgarte が余計なエネルギーを注いでいないか |
 | `MmdPhysics.Core.Pendulum` | 重力・並進ロック・減衰が機能しているか |
 | `MmdPhysics.Core.GlbParity` | **C# 版とビット一致するか**（実モデル 300 フレーム） |
+| `MmdPhysics.Core.MaterialReader` | 各マテリアルの `extras.mmd` を読めているか |
 | `MmdPhysics.Bridge.UeSpace` | 位置と回転が同一の純回転か（行列式 +1） |
 | `MmdPhysics.Bridge.ImportConvention` | 実際に取り込んだスケルトンと座標系が合うか |
 | `MmdPhysics.Editor.WirePhysics` | 配線 → 評価 → 書き戻しが端から端まで通るか |
+| `MmdPhysics.Editor.ConvertMaterials` | 全スロットに MI が付くか、`alphaMode=BLEND` だけが Translucent 親か |
 
 ### 自動化していない部分
 

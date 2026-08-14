@@ -36,6 +36,18 @@ using namespace MmdPhysics;
 namespace
 {
 	const TCHAR* KMasterName = TEXT("M_MmdToon");
+	const TCHAR* KMasterTranslucentName = TEXT("M_MmdToonTranslucent");
+
+	const TCHAR* MasterAssetName(EMmdMasterVariant Variant)
+	{
+		return Variant == EMmdMasterVariant::Translucent ? KMasterTranslucentName : KMasterName;
+	}
+
+	/** glTF の alphaMode が BLEND か (= 真の半透明として扱うか)。 */
+	bool IsBlendMaterial(const MmdMaterialInfo& Info)
+	{
+		return Info.AlphaMode.Equals(TEXT("BLEND"), ESearchCase::IgnoreCase);
+	}
 
 	bool SavePackageOfAsset(UObject* Asset)
 	{
@@ -125,13 +137,17 @@ namespace
 	}
 }
 
-UMaterial* FMmdMaterialConversion::EnsureMasterMaterial(const FString& PackagePath)
+UMaterial* FMmdMaterialConversion::EnsureMasterMaterial(const FString& PackagePath, EMmdMasterVariant Variant)
 {
-	// プラグイン側でグラフを作り替えたときに、古い M_MmdToon を掴み続けないようにする。
+	// プラグイン側でグラフを作り替えたときに、古いマスターを掴み続けないようにする。
 	// 版はマテリアル内の "MmdToonVersion" スカラーパラメータで持つ。
-	static constexpr float KMasterVersion = 6.0f;
+	// 7.0: Translucent 版マスターを追加し、グラフ生成を共通化 (2026-08-14)。
+	static constexpr float KMasterVersion = 7.0f;
 
-	const FString FullPath = PackagePath / KMasterName + TEXT(".") + KMasterName;
+	const bool bTranslucent = (Variant == EMmdMasterVariant::Translucent);
+	const TCHAR* AssetName = MasterAssetName(Variant);
+
+	const FString FullPath = PackagePath / AssetName + TEXT(".") + AssetName;
 	if (UMaterial* Existing = LoadObject<UMaterial>(nullptr, *FullPath, nullptr, LOAD_NoWarn | LOAD_Quiet))
 	{
 		const float Ver = UMaterialEditingLibrary::GetMaterialDefaultScalarParameterValue(Existing, TEXT("MmdToonVersion"));
@@ -141,7 +157,7 @@ UMaterial* FMmdMaterialConversion::EnsureMasterMaterial(const FString& PackagePa
 		}
 		// 版が古い/壊れている。既存グラフを捨てて作り直す。
 		UE_LOG(LogMmdPhysics, Log, TEXT("[MmdPhysics] 既存の %s を作り直します (版 %g → %g)。"),
-			KMasterName, Ver, KMasterVersion);
+			AssetName, Ver, KMasterVersion);
 		Existing->GetEditorOnlyData()->ExpressionCollection.Empty();
 	}
 
@@ -150,7 +166,7 @@ UMaterial* FMmdMaterialConversion::EnsureMasterMaterial(const FString& PackagePa
 	{
 		IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
 		UMaterialFactoryNew* Factory = NewObject<UMaterialFactoryNew>();
-		Mat = Cast<UMaterial>(AssetTools.CreateAsset(KMasterName, PackagePath, UMaterial::StaticClass(), Factory));
+		Mat = Cast<UMaterial>(AssetTools.CreateAsset(AssetName, PackagePath, UMaterial::StaticClass(), Factory));
 	}
 	if (Mat == nullptr) return nullptr;
 
@@ -163,9 +179,13 @@ UMaterial* FMmdMaterialConversion::EnsureMasterMaterial(const FString& PackagePa
 
 	// MMD は KHR_materials_unlit で出力される。陰影はトゥーンランプで自前に作る。
 	Mat->SetShadingModel(MSM_Unlit);
-	// アルファは材質ごとに opaque / mask / blend があるが、Masked ひとつで両立させる
-	// (opaque な材質はマスク閾値を 0 にすれば実質不透明になる)。
-	Mat->BlendMode = BLEND_Masked;
+
+	// ★ブレンドモードはマテリアル単位の静的スイッチなので、alphaMode ごとにマスターを分ける。
+	//   OPAQUE / MASK → Masked (opaque な材質はインスタンス側でマスク閾値を 0 にして実質不透明にする)
+	//   BLEND         → Translucent (しきい値で切らず、アルファをそのまま混ぜる)
+	//   以前は全材質を Masked に寄せていたが、IA の眉のような半透明グラデーションが
+	//   しきい値で切り抜かれ、移植元 Unity 版と見た目が食い違っていた。
+	Mat->BlendMode = bTranslucent ? BLEND_Translucent : BLEND_Masked;
 	Mat->TwoSided = true;   // MMD は両面材質が多い。個別制御はインスタンスの上書きで行う。
 
 	// ★使用フラグを必ず立てる。
@@ -303,9 +323,14 @@ UMaterial* FMmdMaterialConversion::EnsureMasterMaterial(const FString& PackagePa
 	{
 		UE_LOG(LogMmdPhysics, Error, TEXT("[MmdPhysics] EmissiveColor への接続に失敗しました (色が出ません)。"));
 	}
-	if (!UMaterialEditingLibrary::ConnectMaterialProperty(BaseTex, TEXT("A"), MP_OpacityMask))
+	// ★アルファの行き先はブレンドモードで変わる。Masked は OpacityMask (しきい値カット)、
+	//   Translucent は Opacity (そのまま混ぜる)。繋ぐ先を間違えても接続自体は成功してしまい、
+	//   「半透明が全部不透明」「マスクが効かない」という形でしか気付けない。
+	const EMaterialProperty AlphaTarget = bTranslucent ? MP_Opacity : MP_OpacityMask;
+	if (!UMaterialEditingLibrary::ConnectMaterialProperty(BaseTex, TEXT("A"), AlphaTarget))
 	{
-		UE_LOG(LogMmdPhysics, Error, TEXT("[MmdPhysics] OpacityMask への接続に失敗しました。"));
+		UE_LOG(LogMmdPhysics, Error, TEXT("[MmdPhysics] %s への接続に失敗しました。"),
+			bTranslucent ? TEXT("Opacity") : TEXT("OpacityMask"));
 	}
 
 	UMaterialEditingLibrary::RecompileMaterial(Mat);
@@ -330,7 +355,8 @@ UMaterial* FMmdMaterialConversion::EnsureMasterMaterial(const FString& PackagePa
 
 	SavePackageOfAsset(Mat);
 
-	UE_LOG(LogMmdPhysics, Log, TEXT("[MmdPhysics] マスターマテリアルを生成しました: %s"), *FullPath);
+	UE_LOG(LogMmdPhysics, Log, TEXT("[MmdPhysics] マスターマテリアル (%s) を生成しました: %s"),
+		bTranslucent ? TEXT("Translucent") : TEXT("Masked"), *FullPath);
 	return Mat;
 }
 
@@ -355,11 +381,26 @@ FMmdMaterialResult FMmdMaterialConversion::ConvertMaterials(USkeletalMesh* Mesh,
 	for (const FString& W : Warnings) UE_LOG(LogMmdPhysics, Warning, TEXT("[MmdPhysics] %s"), *W);
 
 	const FString PackagePath = FPackageName::GetLongPackagePath(Mesh->GetOutermost()->GetName());
-	UMaterial* Master = EnsureMasterMaterial(PackagePath);
-	if (Master == nullptr)
+	UMaterial* MaskedMaster = EnsureMasterMaterial(PackagePath, EMmdMasterVariant::Masked);
+	if (MaskedMaster == nullptr)
 	{
 		Result.Message = TEXT("マスターマテリアルを用意できませんでした。");
 		return Result;
+	}
+
+	// Translucent マスターは alphaMode=BLEND の材質があるモデルでだけ作る
+	// (半透明を持たないモデルのフォルダに未使用アセットを増やさない)。
+	UMaterial* TranslucentMaster = nullptr;
+	if (Set.Materials.ContainsByPredicate([](const MmdMaterialInfo& M) { return IsBlendMaterial(M); }))
+	{
+		TranslucentMaster = EnsureMasterMaterial(PackagePath, EMmdMasterVariant::Translucent);
+		if (TranslucentMaster == nullptr)
+		{
+			// 致命ではない。Masked へ倒して続行する (従来どおりしきい値で抜ける)。
+			UE_LOG(LogMmdPhysics, Warning,
+				TEXT("[MmdPhysics] Translucent マスターを用意できませんでした。")
+				TEXT("alphaMode=BLEND の材質も Masked で変換します (半透明がしきい値で切り抜かれます)。"));
+		}
 	}
 
 	IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
@@ -386,6 +427,10 @@ FMmdMaterialResult FMmdMaterialConversion::ConvertMaterials(USkeletalMesh* Mesh,
 			continue;
 		}
 
+		// alphaMode で親を選ぶ。BLEND だけ Translucent マスターへ繋ぐ。
+		const bool bTranslucent = IsBlendMaterial(*Info) && TranslucentMaster != nullptr;
+		UMaterial* Master = bTranslucent ? TranslucentMaster : MaskedMaster;
+
 		const FString MiName = FString::Printf(TEXT("MI_%s_%s"), *Mesh->GetName(), *SlotName);
 		UMaterialInstanceConstant* MI = LoadObject<UMaterialInstanceConstant>(
 			nullptr, *(PackagePath / MiName + TEXT(".") + MiName));
@@ -397,6 +442,13 @@ FMmdMaterialResult FMmdMaterialConversion::ConvertMaterials(USkeletalMesh* Mesh,
 				AssetTools.CreateAsset(MiName, PackagePath, UMaterialInstanceConstant::StaticClass(), MiFactory));
 		}
 		if (MI == nullptr) continue;
+
+		// ★再変換で親が変わることがある (Masked 一本だった頃に作った MI、alphaMode の付いた
+		//   .glb へ差し替えた場合など)。親を直さないと古いブレンドモードのまま残る。
+		if (MI->Parent != Master)
+		{
+			MI->SetParentEditorOnly(Master);
+		}
 
 		// --- テクスチャ ---
 		if (Set.HasTexture(Info->BaseColorTexture))
@@ -452,23 +504,65 @@ FMmdMaterialResult FMmdMaterialConversion::ConvertMaterials(USkeletalMesh* Mesh,
 		// --- 描画設定の上書き ---
 		MI->BasePropertyOverrides.bOverride_TwoSided = true;
 		MI->BasePropertyOverrides.TwoSided = Info->bDoubleSided || Info->IsDoubleSidedFlag();
-		MI->BasePropertyOverrides.bOverride_OpacityMaskClipValue = true;
-		// opaque な材質はマスクを効かせない (閾値 0)。mask/blend はテクスチャのアルファで抜く。
-		MI->BasePropertyOverrides.OpacityMaskClipValue = (Info->AlphaClass == TEXT("opaque")) ? 0.0f : 0.333f;
+
+		// マスク閾値は Masked 側でしか意味を持たない。Translucent ではアルファをそのまま混ぜる。
+		MI->BasePropertyOverrides.bOverride_OpacityMaskClipValue = !bTranslucent;
+		if (!bTranslucent)
+		{
+			// alphaMode=OPAQUE はアルファを見ない (glTF の定義)。閾値 0 で実質不透明にする。
+			// MASK はテクスチャのアルファでしきい値カット。
+			// ※以前はここを extras.mmd の alphaClass=="opaque" で判定していたが、
+			//   alphaClass は "blend" / "mask" / 未記載のいずれかで "opaque" は出てこないため
+			//   常に 0.333 になっていた。glTF 側の alphaMode で判定する。
+			const bool bOpaque = Info->AlphaMode.IsEmpty()
+				|| Info->AlphaMode.Equals(TEXT("OPAQUE"), ESearchCase::IgnoreCase);
+			MI->BasePropertyOverrides.OpacityMaskClipValue = bOpaque ? 0.0f : 0.333f;
+		}
 
 		MI->PostEditChange();
 		SavePackageOfAsset(MI);
 
 		Slots[SlotIndex].MaterialInterface = MI;
 		Result.Converted++;
+		if (bTranslucent) Result.Translucent++;
 	}
 
 	Mesh->MarkPackageDirty();
 	SavePackageOfAsset(Mesh);
 
+	// ===================================================================
+	// 描画順について (移植元の renderQueue 調整に対応する部分)
+	//
+	// 移植元 MmdPhysicsImporterWindow.cs は半透明材質の renderQueue を手で振っていた
+	// (mask 由来の昇格組 → 2452+slot / 真の半透明 → 3000+slot)。UE では次のように対応する。
+	//
+	// 1) 「不透明寄り (AlphaTest帯) が真の半透明より先」
+	//    → Masked マスターは不透明パスで描かれ深度を書く。半透明パスは必ずその後なので
+	//      構造的に成立する。振り分けるコードは要らない。
+	//    ※そもそも移植元でこの調整が必要だったのは、origTexture を持つモデルで全材質が
+	//      Transparent へ昇格してしまい、不透明相当のものまで半透明キューへ落ちたため。
+	//      こちらは alphaMode=BLEND のものだけを半透明にするので、その状況にならない。
+	//
+	// 2) 「+slotIdx で MMD の材質順を保つ」
+	//    → UE の半透明ソートキーは Priority(16) → Distance(32) → MeshIdInPrimitive(16) の順で、
+	//      同じスケルタルメッシュのセクションは Priority も Distance も同値になるため、
+	//      最下位の MeshIdInPrimitive (= セクション順 = マテリアルスロット順) で決まる。
+	//      つまり MMD の材質順がそのまま再現される。これも追加のコードは要らない。
+	//      (Engine/Source/Runtime/Renderer/Private/BasePassRendering.cpp
+	//       CalculateTranslucentMeshStaticSortKey / Public/MeshPassProcessor.h の
+	//       FMeshDrawCommandSortKey::Translucent)
+	//
+	// 3) TranslucencySortPriority 自体はマテリアルではなく UPrimitiveComponent のプロパティで、
+	//    1 コンポーネントに 1 個しか無い。スロット単位では設定できないので、ここからは触らない。
+	//    効くのは「このモデル全体 vs シーン内の他の半透明アクター」の順序で、必要なら
+	//    レベル側でスケルタルメッシュコンポーネントに設定する (README のトラブルシュート参照)。
+	// ===================================================================
+
 	Result.bSuccess = Result.Converted > 0;
-	Result.Message = FString::Printf(TEXT("マテリアルを変換しました: %d / %d スロット (マスター: %s)"),
-		Result.Converted, Result.Total, KMasterName);
+	Result.Message = FString::Printf(
+		TEXT("マテリアルを変換しました: %d / %d スロット (うち半透明 %d / マスター: %s%s)"),
+		Result.Converted, Result.Total, Result.Translucent, KMasterName,
+		Result.Translucent > 0 ? TEXT(" + M_MmdToonTranslucent") : TEXT(""));
 	UE_LOG(LogMmdPhysics, Log, TEXT("[MmdPhysics] %s"), *Result.Message);
 	return Result;
 }

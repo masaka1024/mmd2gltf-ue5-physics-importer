@@ -55,13 +55,25 @@ See [INSTALL.md](INSTALL.md).
    glTFRuntime, the deprecated legacy GLTFImporter, or an FBX detour will not match the coordinate system.
 2. Open **Tools → MMD Physics インポーター**
 3. Pick the skeletal mesh and the `.glb`, then press **"1. Wire / Re-wire Physics"**
-4. Play
+4. Then press **"2. Convert materials to MMD toon"**
+5. Play
 
-This creates and assigns a Post-Process Anim Blueprint named `ABP_<MeshName>_MmdPhysics`
+Step 1 creates and assigns a Post-Process Anim Blueprint named `ABP_<MeshName>_MmdPhysics`
 next to the skeletal mesh.
 
 On startup the plugin cross-checks `extras.mmd` bone positions against the skeleton's reference pose
 and logs an actionable error if the import convention does not match.
+
+### Troubleshooting
+
+| Symptom | What to check |
+|---|---|
+| Hair/skirt motion looks coarse or judders | On the MMD Physics node, **`FixedTimeStep` should be `1/60` (0.01667)** and **`SubSteps` 2**. At `1/30` the number of internal steps per frame alternates 0,1,0,1,1,... so the real-time update interval is uneven. To step finer, raise `SubSteps`, not `FixedTimeStep` (see [docs/porting_notes.md](docs/porting_notes.md)) |
+| Motion is ~3x faster than MMD | `Gravity` must be 98 (PMX units). It is unrelated to UE world gravity |
+| A semi-transparent material has hard, jagged edges | Its material instance should have `M_MmdToonTranslucent` as its parent. If not, the `.glb` material's `alphaMode` is probably not `BLEND` |
+| Translucent materials are drawn in the wrong order | Order follows the material slot order. Fix the material order in the model, or set `TranslucencySortPriority` on the skeletal mesh component in the level (that only orders the whole model against other actors) |
+| Materials render grey | Look for `[MmdPhysics] マテリアルのコンパイルエラー` in the output log |
+| The log reports the physics went NaN | Raise `SubSteps`. Happens on models with very stiff springs or very light bodies |
 
 ---
 
@@ -88,7 +100,7 @@ Derivation and measured validation: [docs/coordinate_transform.md](docs/coordina
 
 | | Status |
 |---|---|
-| UE 5.5 | Development and verification target. 8 automated tests green |
+| UE 5.5 | Development and verification target. 10 automated tests green |
 | UE 5.6 | Source-level compatibility only. **Not verified on a real install** |
 
 ## Known limitations
@@ -98,10 +110,23 @@ Derivation and measured validation: [docs/coordinate_transform.md](docs/coordina
 - **Outlines (edges) are not supported yet.** `edgeColor` / `edgeSize` are stored on the material
   instances, so they can be used by a later implementation.
 - **Materials are Unlit.** This matches MMD, which exports with `KHR_materials_unlit`; shading comes
-  from a light direction parameter (`LightDir` on `M_MmdToon`) plus the toon ramp. The trade-off is
-  that they do not respond to UE scene lights or Lumen.
+  from a light direction parameter (`LightDir` on `M_MmdToon` / `M_MmdToonTranslucent`) plus the toon
+  ramp. The trade-off is that they do not respond to UE scene lights or Lumen.
 - **Shared toons (`toon01`..`toon10`) are not bundled** — they are not part of the model either.
   Import them into the project yourself; they are located by name from anywhere in `/Game`.
+- **Ordering between translucent materials follows the material (slot) order.** UE's translucent sort
+  key is `Priority → Distance → section order`, and sections of one skeletal mesh tie on the first two,
+  so MMD's material order is reproduced as-is. However **`TranslucencySortPriority` is a
+  `UPrimitiveComponent` property and cannot be set per slot**, so the Unity version's per-material
+  `renderQueue = 3000 + slotIdx` nudging has no equivalent here.
+- **Sorting *within* a translucent material (the Unity version's lilToon TwoPass) is not reproduced**,
+  because UE translucent materials have no depth-write prepass. This only bites when a single
+  `alphaMode=BLEND` material overlaps itself (e.g. see-through hair authored as BLEND). MMD hair, skin
+  and clothing are normally `MASK`, so they render in the opaque pass and are unaffected.
+- **`origTexture` in `extras.mmd` (the un-prebaked texture) is not supported.** The Unity version
+  promotes such materials from `MASK` to translucent and uses the un-prebaked image to reproduce MMD's
+  soft eyebrows and see-through hair. This port does not extract textures from the GLB binary, so it
+  uses `alphaMode` as-is.
 - `sphereMode: 3` (sub-texture), `ambient` and `specular` are not supported
   (the Unity version does not support ambient/specular either).
 - **Hitbox generation (the Unity version's step 3) is out of scope.**

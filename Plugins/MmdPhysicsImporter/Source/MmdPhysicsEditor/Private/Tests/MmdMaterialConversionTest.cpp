@@ -5,7 +5,9 @@
 #include "Misc/AutomationTest.h"
 #include "HAL/PlatformMisc.h"
 #include "Engine/SkeletalMesh.h"
+#include "Materials/Material.h"
 #include "Materials/MaterialInstanceConstant.h"
+#include "MmdGlbMaterialReader.h"
 #include "MmdMaterialConversion.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -66,6 +68,58 @@ bool FMmdMaterialConversionTest::RunTest(const FString& Parameters)
 		AddWarning(TEXT("トゥーンが 1 件も有効になっていません。")
 			TEXT("共有トゥーン (toon01..toon10) はモデルに同梱されないため、")
 			TEXT("プロジェクトへ別途取り込む必要があります。"));
+	}
+
+	// --- alphaMode=BLEND が Translucent マスターへ繋がっているか ---
+	// .glb 側の alphaMode を正として、スロット名で突き合わせる。
+	MmdPhysics::MmdMaterialSet Set;
+	TArray<FString> Warnings;
+	if (!MmdPhysics::GlbMaterialReader::LoadFile(GlbPath, Set, Warnings))
+	{
+		AddError(TEXT(".glb からマテリアル情報を読めない (alphaMode の照合をスキップ)。"));
+		return false;
+	}
+
+	int32 ExpectedBlend = 0, ActualTranslucent = 0, Mismatched = 0;
+	const TArray<FSkeletalMaterial>& CheckSlots = Mesh->GetMaterials();
+	for (int32 i = 0; i < CheckSlots.Num(); i++)
+	{
+		const FString SlotName = CheckSlots[i].MaterialSlotName.ToString();
+		const MmdPhysics::MmdMaterialInfo* Info = Set.Materials.FindByPredicate(
+			[&SlotName](const MmdPhysics::MmdMaterialInfo& M) { return M.Name == SlotName; });
+		if (Info == nullptr && Set.Materials.IsValidIndex(i)) Info = &Set.Materials[i];
+		if (Info == nullptr) continue;
+
+		UMaterialInstanceConstant* MI = Cast<UMaterialInstanceConstant>(CheckSlots[i].MaterialInterface);
+		if (MI == nullptr) continue;
+
+		const UMaterial* Parent = MI->GetMaterial();
+		const bool bWantBlend = Info->AlphaMode.Equals(TEXT("BLEND"), ESearchCase::IgnoreCase);
+		// GetBlendMode() はインスタンスの BasePropertyOverrides まで解決した実効値を返す。
+		const bool bIsTranslucent = (MI->GetBlendMode() == BLEND_Translucent);
+
+		if (bWantBlend) ExpectedBlend++;
+		if (bIsTranslucent) ActualTranslucent++;
+		if (bWantBlend != bIsTranslucent)
+		{
+			Mismatched++;
+			AddError(FString::Printf(
+				TEXT("スロット '%s': alphaMode=%s なのに親は %s (Translucent=%s)"),
+				*SlotName, *Info->AlphaMode,
+				Parent ? *Parent->GetName() : TEXT("null"),
+				bIsTranslucent ? TEXT("true") : TEXT("false")));
+		}
+	}
+
+	AddInfo(FString::Printf(TEXT("alphaMode=BLEND %d 件 / Translucent 親 %d 件"),
+		ExpectedBlend, ActualTranslucent));
+	TestEqual(TEXT("alphaMode=BLEND の材質だけが Translucent マスターへ繋がっている"), Mismatched, 0);
+	TestEqual(TEXT("戻り値の Translucent 件数が実際と一致する"), R.Translucent, ActualTranslucent);
+
+	if (ExpectedBlend == 0)
+	{
+		AddWarning(TEXT("このモデルには alphaMode=BLEND の材質がありません。")
+			TEXT("半透明の経路は実質未検証です。"));
 	}
 
 	return true;

@@ -134,11 +134,13 @@ void SMmdImporterWindow::Construct(const FArguments& InArgs)
 					return L(
 						TEXT("マスターマテリアル M_MmdToon を生成し、材質ごとにインスタンスを作って割り当てます。")
 						TEXT("Unlit + 自前の N·L トゥーンで、スフィアマップ (乗算/加算) にも対応します。")
+						TEXT("alphaMode=BLEND の材質は M_MmdToonTranslucent (半透明) の方から作ります。")
 						TEXT("共有トゥーン (toon01〜toon10) はモデルに含まれないので、")
 						TEXT("別途プロジェクトへ取り込んでください (名前でプロジェクト全体から探します)。")
 						TEXT("アウトラインは未対応です。"),
 						TEXT("Creates the M_MmdToon master material and one instance per MMD material. ")
 						TEXT("Unlit with a hand-built N·L toon ramp; sphere maps (multiply/add) are supported. ")
+						TEXT("Materials with alphaMode=BLEND are instanced from M_MmdToonTranslucent instead. ")
 						TEXT("Shared toons (toon01..toon10) are not bundled with the model - import them into the ")
 						TEXT("project yourself and they will be found by name. Outlines are not supported yet."));
 				})
