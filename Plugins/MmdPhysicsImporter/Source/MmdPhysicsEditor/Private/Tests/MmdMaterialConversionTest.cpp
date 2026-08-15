@@ -255,7 +255,7 @@ bool FMmdMaterialConversionTest::RunTest(const FString& Parameters)
 	int32 ColorMismatched = 0, TexturelessCount = 0, SubpassMismatched = 0, SubpassCount = 0;
 	// 変換と同じ場所からテクスチャを引くために、メッシュのフォルダを求めておく。
 	const FString PackagePath = FPackageName::GetLongPackagePath(Mesh->GetOutermost()->GetName());
-	int32 OverlayCount = 0;
+	int32 OverlayCount = 0, OutlineMismatched = 0, OutlineCount = 0;
 	const TArray<FSkeletalMaterial>& CheckSlots = Mesh->GetMaterials();
 	for (int32 i = 0; i < CheckSlots.Num(); i++)
 	{
@@ -347,6 +347,21 @@ bool FMmdMaterialConversionTest::RunTest(const FString& Parameters)
 			}
 		}
 
+		// --- 輪郭線フラグ (PMX flags bit4) が入っているか ---
+		{
+			float ActualOutline = -1.0f;
+			MI->GetScalarParameterValue(FMaterialParameterInfo(TEXT("UseOutline")), ActualOutline);
+			const float WantOutline = Info->HasEdge() ? 1.0f : 0.0f;
+			if (!FMath::IsNearlyEqual(ActualOutline, WantOutline, 1e-4f))
+			{
+				OutlineMismatched++;
+				AddError(FString::Printf(
+					TEXT("スロット '%s': flags=%d (輪郭線 %s) なのに UseOutline=%g"),
+					*SlotName, Info->Flags, Info->HasEdge() ? TEXT("あり") : TEXT("なし"), ActualOutline));
+			}
+			if (Info->HasEdge()) OutlineCount++;
+		}
+
 		// --- origTexture: BaseColorTex が無加工版に差し替わっているか ---
 		if (Plan.bUseOrigTexture)
 		{
@@ -387,6 +402,23 @@ bool FMmdMaterialConversionTest::RunTest(const FString& Parameters)
 	AddInfo(FString::Printf(TEXT("ベーステクスチャを持たない材質: %d 件 (拡散色だけで色が決まる)"), TexturelessCount));
 	TestEqual(TEXT("不透明サブパス (TwoPass 相当) の重みが正しい"), SubpassMismatched, 0);
 	AddInfo(FString::Printf(TEXT("不透明サブパスを使う半透明材質: %d 件"), SubpassCount));
+
+	// --- 輪郭線 ---
+	TestEqual(TEXT("輪郭線フラグがマテリアルインスタンスに入っている"), OutlineMismatched, 0);
+	TestEqual(TEXT("戻り値の輪郭線材質数が実際と一致する"), R.WithOutline, OutlineCount);
+	AddInfo(FString::Printf(TEXT("輪郭線を描く材質: %d 件"), OutlineCount));
+	if (OutlineCount > 0)
+	{
+		// 輪郭線マスターが同じフォルダに用意されているか
+		// (実際に描くのは MmdOutlineComponent で、これを名前で探す)。
+		const FString OutlinePath = PackagePath / TEXT("M_MmdOutline.M_MmdOutline");
+		UMaterial* Outline = LoadObject<UMaterial>(nullptr, *OutlinePath, nullptr, LOAD_NoWarn | LOAD_Quiet);
+		if (TestNotNull(TEXT("輪郭線マスターが生成されている"), Outline))
+		{
+			TestEqual(TEXT("輪郭線マスターは Masked"), (int32)Outline->BlendMode, (int32)BLEND_Masked);
+			TestTrue(TEXT("輪郭線マスターは両面 (裏面を描くため)"), Outline->TwoSided);
+		}
+	}
 
 	if (WithOrigTexture > 0)
 	{

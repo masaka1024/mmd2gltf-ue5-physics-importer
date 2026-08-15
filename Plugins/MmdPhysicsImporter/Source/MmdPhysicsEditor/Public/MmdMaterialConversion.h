@@ -136,6 +136,8 @@ struct MMDPHYSICSEDITOR_API FMmdMaterialResult
 	int32 OrigTextureApplied = 0;
 	/** GLB バイナリから取り出してアセット化したテクスチャ数。 */
 	int32 ExtractedTextures = 0;
+	/** 輪郭線フラグ (PMX flags bit4) が立っている材質の数。 */
+	int32 WithOutline = 0;
 	FString Message;
 };
 
@@ -182,4 +184,12 @@ public:
 	 */
 	static UMaterial* EnsureMasterMaterial(const FString& PackagePath,
 		EMmdMasterVariant Variant = EMmdMasterVariant::Masked);
+
+	/**
+	 * 輪郭線 (反転ハル) 用のマスター "M_MmdOutline" を用意する。
+	 *
+	 * 本体マスターとは別物で、法線方向に膨らませて表面を捨てるだけのマテリアル。
+	 * これを割り当てるのは本体ではなく UMmdOutlineComponent 側。
+	 */
+	static UMaterial* EnsureOutlineMaterial(const FString& PackagePath);
 };

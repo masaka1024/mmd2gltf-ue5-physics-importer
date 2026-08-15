@@ -25,6 +25,7 @@
 #include "Materials/MaterialExpressionScalarParameter.h"
 #include "Materials/MaterialExpressionTextureSampleParameter2D.h"
 #include "Materials/MaterialExpressionTransform.h"
+#include "Materials/MaterialExpressionTwoSidedSign.h"
 #include "Materials/MaterialExpressionVectorParameter.h"
 #include "Materials/MaterialExpressionVertexNormalWS.h"
 #include "Materials/MaterialInstanceConstant.h"
@@ -44,6 +45,8 @@ namespace
 {
 	const TCHAR* KMasterName = TEXT("M_MmdToon");
 	const TCHAR* KMasterTranslucentName = TEXT("M_MmdToonTranslucent");
+	/** 輪郭線 (反転ハル) 用のマスター。本体とは別のコンポーネントで使う。 */
+	const TCHAR* KOutlineName = TEXT("M_MmdOutline");
 
 	/**
 	 * GLB から取り出したテクスチャの置き場 (モデルのフォルダ配下)。
@@ -478,7 +481,8 @@ UMaterial* FMmdMaterialConversion::EnsureMasterMaterial(const FString& PackagePa
 	//       (値ごとに静的 permutation が増えるのを避けるため) (2026-08-15)。
 	// 11.0: 方式が決まったので検証用の分岐を削除。ディザと、プリベイク版/無加工版を
 	//       切り替えるための 2 枚目のサンプラを捨てた (2026-08-15)。
-	static constexpr float KMasterVersion = 11.0f;
+	// 12.0: 輪郭線フラグ (UseOutline) を持たせた。描くのは MmdOutlineComponent (2026-08-15)。
+	static constexpr float KMasterVersion = 12.0f;
 
 	const bool bTranslucent = (Variant == EMmdMasterVariant::Translucent);
 	const TCHAR* AssetName = MasterAssetName(Variant);
@@ -583,11 +587,17 @@ UMaterial* FMmdMaterialConversion::EnsureMasterMaterial(const FString& PackagePa
 	SphereAdd->ParameterName = TEXT("SphereAddWeight");
 	SphereAdd->DefaultValue = 0.0f;
 
-	// エッジは今回描かないが、後で使えるようにパラメータだけ持たせる。
+	// 輪郭線 (エッジ) の値。ここでは描かない。
+	// 描くのは別コンポーネント (MmdOutlineComponent) で、この 3 つを読んで
+	// 輪郭線用のマテリアルへ渡す。
 	auto* EdgeColor = MakeNode<UMaterialExpressionVectorParameter>(Mat, -1300, 900);
 	EdgeColor->ParameterName = TEXT("EdgeColor");
 	auto* EdgeSize = MakeNode<UMaterialExpressionScalarParameter>(Mat, -1300, 1000);
 	EdgeSize->ParameterName = TEXT("EdgeSize");
+	// PMX の描画フラグ bit4。輪郭線を描く材質かどうか。
+	auto* UseOutline = MakeNode<UMaterialExpressionScalarParameter>(Mat, -1300, 1100);
+	UseOutline->ParameterName = TEXT("UseOutline");
+	UseOutline->DefaultValue = 0.0f;
 
 	auto* One = MakeNode<UMaterialExpressionConstant>(Mat, -600, 300);
 	One->R = 1.0f;
@@ -805,6 +815,139 @@ UMaterial* FMmdMaterialConversion::EnsureMasterMaterial(const FString& PackagePa
 
 	UE_LOG(LogMmdPhysics, Log, TEXT("[MmdPhysics] マスターマテリアル (%s) を生成しました: %s"),
 		bTranslucent ? TEXT("Translucent") : TEXT("Masked"), *FullPath);
+	return Mat;
+}
+
+UMaterial* FMmdMaterialConversion::EnsureOutlineMaterial(const FString& PackagePath)
+{
+	// 輪郭線マスターの版。本体マスターとは別に持つ (グラフが別物なので)。
+	static constexpr float KOutlineVersion = 1.0f;
+
+	const FString FullPath = PackagePath / KOutlineName + TEXT(".") + KOutlineName;
+	if (UMaterial* Existing = LoadObject<UMaterial>(nullptr, *FullPath, nullptr, LOAD_NoWarn | LOAD_Quiet))
+	{
+		const float Ver = UMaterialEditingLibrary::GetMaterialDefaultScalarParameterValue(Existing, TEXT("MmdOutlineVersion"));
+		if (FMath::IsNearlyEqual(Ver, KOutlineVersion))
+		{
+			return Existing;
+		}
+		UE_LOG(LogMmdPhysics, Log, TEXT("[MmdPhysics] 既存の %s を作り直します (版 %g → %g)。"),
+			KOutlineName, Ver, KOutlineVersion);
+		Existing->GetEditorOnlyData()->ExpressionCollection.Empty();
+	}
+
+	UMaterial* Mat = LoadObject<UMaterial>(nullptr, *FullPath, nullptr, LOAD_NoWarn | LOAD_Quiet);
+	if (Mat == nullptr)
+	{
+		IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
+		UMaterialFactoryNew* Factory = NewObject<UMaterialFactoryNew>();
+		Mat = Cast<UMaterial>(AssetTools.CreateAsset(KOutlineName, PackagePath, UMaterial::StaticClass(), Factory));
+	}
+	if (Mat == nullptr) return nullptr;
+
+	{
+		auto* VerParam = MakeNode<UMaterialExpressionScalarParameter>(Mat, -1500, -200);
+		VerParam->ParameterName = TEXT("MmdOutlineVersion");
+		VerParam->DefaultValue = KOutlineVersion;
+	}
+
+	// ===================================================================
+	// MMD の輪郭線は「モデルをもう一度、法線方向へ膨らませて、表面を捨てて描く」
+	// (反転ハル)。MMD 自身も同じ描き方をしている。
+	//
+	// UE では次のように作る:
+	//   ・膨らませ  … WorldPositionOffset に 法線 × 太さ
+	//   ・表面を捨てる … TwoSidedSign が +1 (表) の画素を OpacityMask で落とす。
+	//                    残るのは膨らませた裏面 = シルエットの輪
+	//   ・色       … EmissiveColor に EdgeColor (Unlit なので陰影は付かない)
+	//
+	// ★メッシュは複製しない。同じスケルタルメッシュを参照する別コンポーネントに
+	//   このマテリアルを割り当てる (MmdOutlineComponent)。セクションを複製する方式だと
+	//   モーフのデルタまで作り直すことになり、しかも再インポートで消える。
+	// ===================================================================
+	Mat->SetShadingModel(MSM_Unlit);
+	Mat->BlendMode = BLEND_Masked;
+	Mat->TwoSided = true;   // 裏面を描くので必須
+	{
+		bool bNeedsRecompile = false;
+		Mat->SetMaterialUsage(bNeedsRecompile, MATUSAGE_SkeletalMesh);
+		Mat->SetMaterialUsage(bNeedsRecompile, MATUSAGE_MorphTargets);
+	}
+
+	auto* EdgeColor = MakeNode<UMaterialExpressionVectorParameter>(Mat, -600, 0);
+	EdgeColor->ParameterName = TEXT("EdgeColor");
+	EdgeColor->DefaultValue = FLinearColor::Black;
+
+	auto* EdgeSize = MakeNode<UMaterialExpressionScalarParameter>(Mat, -900, 200);
+	EdgeSize->ParameterName = TEXT("EdgeSize");
+	EdgeSize->DefaultValue = 1.0f;
+
+	// ★PMX の edgeSize (IA は 0.596) を UE の cm へ落とす係数。
+	//   MMD 側の見た目に合わせて実測で決めるものなので、パラメータで出しておく。
+	auto* WidthScale = MakeNode<UMaterialExpressionScalarParameter>(Mat, -900, 260);
+	WidthScale->ParameterName = TEXT("OutlineWidthScale");
+	WidthScale->DefaultValue = 0.15f;
+
+	auto* UseOutline = MakeNode<UMaterialExpressionScalarParameter>(Mat, -900, 400);
+	UseOutline->ParameterName = TEXT("UseOutline");
+	UseOutline->DefaultValue = 1.0f;
+
+	// --- 膨らませ: 法線 × (EdgeSize × 係数) ---
+	auto* Width = MakeNode<UMaterialExpressionMultiply>(Mat, -700, 230);
+	Connect(EdgeSize, TEXT(""), Width, TEXT("A"));
+	Connect(WidthScale, TEXT(""), Width, TEXT("B"));
+
+	auto* NormalWS = MakeNode<UMaterialExpressionVertexNormalWS>(Mat, -700, 150);
+	auto* Offset = MakeNode<UMaterialExpressionMultiply>(Mat, -500, 200);
+	Connect(NormalWS, TEXT(""), Offset, TEXT("A"));
+	Connect(Width, TEXT(""), Offset, TEXT("B"));
+
+	// --- 表面を捨てる: TwoSidedSign は表で +1 / 裏で -1 ---
+	auto* Sign = MakeNode<UMaterialExpressionTwoSidedSign>(Mat, -700, 400);
+	auto* NegSign = MakeNode<UMaterialExpressionMultiply>(Mat, -600, 400);
+	auto* MinusOne = MakeNode<UMaterialExpressionConstant>(Mat, -700, 460);
+	MinusOne->R = -1.0f;
+	Connect(Sign, TEXT(""), NegSign, TEXT("A"));
+	Connect(MinusOne, TEXT(""), NegSign, TEXT("B"));
+
+	auto* BackOnly = MakeNode<UMaterialExpressionSaturate>(Mat, -500, 400);
+	Connect(NegSign, TEXT(""), BackOnly, TEXT(""));
+
+	// 輪郭線を描かない材質はここで全部落とす。
+	auto* MaskOut = MakeNode<UMaterialExpressionMultiply>(Mat, -400, 400);
+	Connect(BackOnly, TEXT(""), MaskOut, TEXT("A"));
+	Connect(UseOutline, TEXT(""), MaskOut, TEXT("B"));
+
+	if (!UMaterialEditingLibrary::ConnectMaterialProperty(EdgeColor, TEXT(""), MP_EmissiveColor))
+	{
+		UE_LOG(LogMmdPhysics, Error, TEXT("[MmdPhysics] 輪郭線: EmissiveColor への接続に失敗しました。"));
+	}
+	if (!UMaterialEditingLibrary::ConnectMaterialProperty(MaskOut, TEXT(""), MP_OpacityMask))
+	{
+		UE_LOG(LogMmdPhysics, Error, TEXT("[MmdPhysics] 輪郭線: OpacityMask への接続に失敗しました。"));
+	}
+	if (!UMaterialEditingLibrary::ConnectMaterialProperty(Offset, TEXT(""), MP_WorldPositionOffset))
+	{
+		UE_LOG(LogMmdPhysics, Error, TEXT("[MmdPhysics] 輪郭線: WorldPositionOffset への接続に失敗しました。"));
+	}
+
+	UMaterialEditingLibrary::RecompileMaterial(Mat);
+
+	if (const FMaterialResource* Res = Mat->GetMaterialResource(GMaxRHIFeatureLevel))
+	{
+		const TArray<FString>& Errors = Res->GetCompileErrors();
+		if (Errors.Num() > 0)
+		{
+			for (const FString& E : Errors)
+			{
+				UE_LOG(LogMmdPhysics, Error, TEXT("[MmdPhysics] 輪郭線マテリアルのコンパイルエラー: %s"), *E);
+			}
+			return nullptr;
+		}
+	}
+
+	SavePackageOfAsset(Mat);
+	UE_LOG(LogMmdPhysics, Log, TEXT("[MmdPhysics] 輪郭線マスターを生成しました: %s"), *FullPath);
 	return Mat;
 }
 
@@ -1036,10 +1179,14 @@ FMmdMaterialResult FMmdMaterialConversion::ConvertMaterials(USkeletalMesh* Mesh,
 		UMaterialEditingLibrary::SetMaterialInstanceScalarParameterValue(MI, TEXT("SphereMulWeight"), MulWeight);
 		UMaterialEditingLibrary::SetMaterialInstanceScalarParameterValue(MI, TEXT("SphereAddWeight"), AddWeight);
 
-		// --- エッジ (今回は描画しないが値は保存しておく) ---
+		// --- 輪郭線 (描くのは MmdOutlineComponent。ここでは値だけ持たせる) ---
 		UMaterialEditingLibrary::SetMaterialInstanceVectorParameterValue(MI, TEXT("EdgeColor"),
 			FLinearColor(Info->EdgeColor[0], Info->EdgeColor[1], Info->EdgeColor[2], Info->EdgeColor[3]));
 		UMaterialEditingLibrary::SetMaterialInstanceScalarParameterValue(MI, TEXT("EdgeSize"), Info->EdgeSize);
+		// PMX 描画フラグ bit4。
+		UMaterialEditingLibrary::SetMaterialInstanceScalarParameterValue(MI, TEXT("UseOutline"),
+			Info->HasEdge() ? 1.0f : 0.0f);
+		if (Info->HasEdge()) Result.WithOutline++;
 
 		// --- 描画設定の上書き ---
 		MI->BasePropertyOverrides.bOverride_TwoSided = true;
@@ -1071,6 +1218,17 @@ FMmdMaterialResult FMmdMaterialConversion::ConvertMaterials(USkeletalMesh* Mesh,
 	}
 
 	Result.ExtractedTextures = Textures.NumExtracted();
+
+	// 輪郭線を描く材質があるモデルでだけ、輪郭線マスターを用意する。
+	// 実際に描くのは UMmdOutlineComponent (アクター側) なので、ここでは素材を置くだけ。
+	if (Result.WithOutline > 0)
+	{
+		if (EnsureOutlineMaterial(PackagePath) == nullptr)
+		{
+			UE_LOG(LogMmdPhysics, Warning,
+				TEXT("[MmdPhysics] 輪郭線マスターを用意できませんでした。輪郭線は出ません。"));
+		}
+	}
 
 	Mesh->MarkPackageDirty();
 	SavePackageOfAsset(Mesh);
