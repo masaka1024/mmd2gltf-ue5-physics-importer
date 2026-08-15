@@ -205,13 +205,13 @@ UE 版は `"mask"` 側を Masked（アルファテスト）に残すので、そ
 | | プリベイク版 | 無加工版 |
 |---|---|---|
 | 想定する描き方 | 硬いアルファテスト | アルファブレンド |
-| UE 側の組み合わせ | Masked + `UseOrigTexture=0` | Translucent + `UseOrigTexture=1` + サブパス |
+| UE 側の組み合わせ | Masked（`AlphaCutoff` でカット） | Translucent + 不透明サブパス |
 
 **試して捨てた案 — ディザ**: Masked のまま `OpacityMask` を確率的に抜けば、深度を書いたまま
-縁を柔らかくできます（移植元 TwoPass の目的に構造的には一致）。マスターに
-`DitherWeight` として実装してありますが、**顔のような近距離の面では市松模様がそのまま見えた**
-ため既定は 0 にしています（TemporalAA を有効にした実機ビューポートで確認）。
-必要なら手動で 1 にして再検証できます。
+縁を柔らかくできます（移植元 TwoPass の目的に構造的には一致）。4x4 の市松をフレームごとに
+位相をずらす Custom ノードとして実装して実機で見ましたが、**顔のような近距離の面では
+市松模様がそのまま見えた**ため捨てました（TemporalAA を有効にしたビューポートで確認）。
+コードは残していません。再挑戦するなら、この結果を踏まえて別の手を考えてください。
 
 ## TwoPass（不透明サブパス）は「不透明度の付け替え」で再現する
 
@@ -253,28 +253,27 @@ lilToon ではほぼ不透明に描かれます。素のアルファブレンド
 ★`TranslucencySortPriority` は `UMaterialInterface` ではなく `UPrimitiveComponent` のプロパティで、
 1 コンポーネントに 1 個しかありません。スロット単位の並び替えには使えないため、インポーターからは触りません。
 
-## マスターは「方式を切り替えられる検証台」になっている
-
-どの方式が MMD / 移植元に近いかはモデルの作り方でも変わるので、**アセットを作り直さずに
-エディタ上で見比べられる**ようにしてあります。マスター 2 枚は同じパラメータ一式を持つので、
-マテリアルインスタンスの `Parent` を付け替えても設定が生きます。
+## マスターのパラメータ
 
 | パラメータ | 効く親 | 意味 |
 |---|---|---|
-| `UseOrigTexture` | 両方 | 0 = プリベイク版 / 1 = 無加工版。両方のテクスチャを常に割り当ててある |
+| `BaseColorTex` | 両方 | プリベイク版 or 無加工版（どちらを入れるかは `PlanMaterial` が決める） |
+| `BaseColor` | 両方 | 拡散色（`baseColorFactor`）。色とアルファの両方に掛かる |
 | `AlphaCutoff` | Masked | アルファのしきい値。負 = アルファを見ない（`alphaMode=OPAQUE`） |
-| `DitherWeight` | Masked | 0 = 硬いカット / 1 = ディザで縁を柔らかく |
 | `SubpassCutoff` | Translucent | TwoPass 相当のしきい値（既定 0.5 = lilToon の `_SubpassCutoff`） |
 | `SubpassWeight` | Translucent | 0 = 素のブレンド / 1 = α ≥ Cutoff を不透明として描く |
+| `ToonTex` / `UseToon` / `SphereTex` / `SphereMulWeight` / `SphereAddWeight` | 両方 | トゥーンとスフィア |
+| `EdgeColor` / `EdgeSize` | 両方 | 輪郭線用。**まだ描画には使っていない**（値の保存だけ） |
 
 ★マスク閾値は `BasePropertyOverrides.OpacityMaskClipValue` ではなく**マテリアルのパラメータ**
-（`AlphaCutoff`）で持っています。BasePropertyOverrides は値ごとに静的 permutation が増えるうえ、
-ディザと硬いカットで必要な閾値が違って両立できないためです。マテリアル側の
-`OpacityMaskClipValue` は 0.5 固定にして、「出力 > 0.5 なら描く」という約束にそろえてあります。
+（`AlphaCutoff`）で持っています。BasePropertyOverrides は値ごとに静的 permutation が増えるためです。
+マテリアル側の `OpacityMaskClipValue` は 0.5 固定にして、「出力 > 0.5 なら描く」という約束に
+そろえてあります。
 
-★ディザはエンジンの `DitherTemporalAA` マテリアル関数を使わず、Custom ノードに HLSL を直接
-書いています。エンジン関数は出力がどの閾値で切られる前提なのかがアセットの中にあって
-読めず（Python からも取り出せませんでした）、正しさを目視でしか確認できないためです。
+★`BaseColorTex` は 1 枚だけです。プリベイク版と無加工版の両方をサンプラで持って切り替える
+作りも試しましたが、マテリアルには 16 サンプラの上限があり、常時 1 枚余計に使うのは
+割に合いません。判定を外したいときはインスタンスの `BaseColorTex` をもう一方のアセットへ
+差し替えられます（無加工版も取り込み済みなので選べます）。
 
 ## GLB バイナリからのテクスチャ抽出
 

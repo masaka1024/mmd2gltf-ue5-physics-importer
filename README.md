@@ -147,10 +147,9 @@ UE へ出す境界でだけ変換します。変換は `FMmdUeSpace` の 1 箇�
   不透明度の付け替えで再現してあります**（マスターの `SubpassCutoff` / `SubpassWeight`）。
   再現できないのは深度書き込みのほうで、α < 0.5 の裾どうしが重なると移植元より濃くなります
   （透け髪の房どうしなど）
-- **見え方はマテリアルインスタンスのパラメータで切り替えられます。** どの方式が MMD に近いかは
-  モデルの作り方でも変わるため、`UseOrigTexture`（プリベイク版／無加工版）、`DitherWeight`
-  （硬いカット／ディザ）、`SubpassCutoff` / `SubpassWeight`（半透明の不透明サブパス）を出してあります。
-  再インポートせずにエディタ上で見比べてください（[docs/porting_notes.md](docs/porting_notes.md)）
+- **見え方はマテリアルインスタンスのパラメータで調整できます。** `SubpassCutoff`（半透明の
+  不透明サブパスのしきい値）や `AlphaCutoff`（マスクのしきい値）を出してあるので、
+  再インポートせずにエディタ上で詰められます（[docs/porting_notes.md](docs/porting_notes.md)）
 - **肌などの不透明な材質は、`origTexture` があっても半透明にしません。**
   移植元は `origTexture` を持つ材質を一律に半透明へ昇格させ、深度は lilToon の TwoPass が
   書いていました。UE の半透明は深度を書けないため、肌まで半透明にすると後段の半透明

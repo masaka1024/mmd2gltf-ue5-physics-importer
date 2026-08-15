@@ -115,16 +115,6 @@ struct MMDPHYSICSEDITOR_API FMmdMaterialPlan
 	bool bSubpassOpaque = false;
 
 	/**
-	 * Masked のときに縁をディザ (確率的に抜く) で柔らかくするか。
-	 *
-	 * 無加工テクスチャは縁の画素が下地と未合成なので、硬いアルファテストで描くと
-	 * その濃さがそのまま出る (IA では眉・目の輪郭の黒フチとして現れた)。
-	 * 深度を書いたまま柔らかくする手段は UE ではディザしかないため、
-	 * **無加工版を使う Masked 材質とディザはセット**にしてある。
-	 */
-	bool bDither = false;
-
-	/**
 	 * Masked のときのアルファのしきい値。
 	 * 負の値 = アルファを見ない (glTF の alphaMode=OPAQUE)。
 	 */
@@ -178,6 +168,12 @@ public:
 	 */
 	static bool MeasureUvAlpha(USkeletalMesh* Mesh, int32 SlotIndex, UTexture2D* Texture,
 		FMmdUvAlphaStats& OutStats);
+
+	/**
+	 * glTF の画像名 ("眼球４.bmp") から、取り込み済みのテクスチャアセットを探す。
+	 * 変換が使うのと同じ探索経路。検証側から同じ材料を組み立て直すために公開している。
+	 */
+	static UTexture2D* FindImportedTextureByImageName(const FString& ImageName, const FString& PackagePath);
 
 	/**
 	 * マスターマテリアルを用意する (無ければ生成する)。

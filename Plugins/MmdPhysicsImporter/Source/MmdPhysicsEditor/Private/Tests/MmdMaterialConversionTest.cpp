@@ -79,8 +79,6 @@ bool FMmdMaterialPlanTest::RunTest(const FString& Parameters)
 		TestFalse(TEXT("alphaClass=mask なら origTexture があっても Masked のまま"), MaskOrig.bTranslucent);
 		TestFalse(TEXT("昇格していない"), MaskOrig.bPromotedByOrigTexture);
 		TestFalse(TEXT("Masked の材質には無加工テクスチャを使わない"), MaskOrig.bUseOrigTexture);
-		// ディザは実機で市松が見えたため不採用 (パラメータは残してあるが既定は 0)。
-		TestFalse(TEXT("ディザは既定で使わない"), MaskOrig.bDither);
 		TestEqual(TEXT("Masked のままなので alphaCutoff が効く"), MaskOrig.AlphaCutoff, 0.25f);
 
 		// alphaClass 未記載 (古い .glb) は mask 扱い = 従来より安全側。
@@ -145,7 +143,6 @@ bool FMmdMaterialPlanTest::RunTest(const FString& Parameters)
 			MakeInfo(TEXT("MASK"), 0.1f, TEXT("blend"), 11, 10));
 		TestTrue(TEXT("昇格した材質は半透明"), BlendOrig.bTranslucent);
 		TestTrue(TEXT("半透明側は無加工版を使う"), BlendOrig.bUseOrigTexture);
-		TestFalse(TEXT("半透明側はディザを使わない"), BlendOrig.bDither);
 
 		// 元から BLEND のものは「昇格」ではない (集計を分けるため)。
 		const FMmdMaterialPlan Blend = FMmdMaterialConversion::PlanMaterial(
@@ -255,7 +252,9 @@ bool FMmdMaterialConversionTest::RunTest(const FString& Parameters)
 
 	int32 ExpectedBlend = 0, ActualTranslucent = 0, Mismatched = 0;
 	int32 ExpectedPromoted = 0, WithOrigTexture = 0, OrigTextureApplied = 0, CutoffMismatched = 0;
-	int32 ColorMismatched = 0, TexturelessCount = 0, SubpassMismatched = 0, SubpassCount = 0, DitherCount = 0;
+	int32 ColorMismatched = 0, TexturelessCount = 0, SubpassMismatched = 0, SubpassCount = 0;
+	// 変換と同じ場所からテクスチャを引くために、メッシュのフォルダを求めておく。
+	const FString PackagePath = FPackageName::GetLongPackagePath(Mesh->GetOutermost()->GetName());
 	int32 OverlayCount = 0;
 	const TArray<FSkeletalMaterial>& CheckSlots = Mesh->GetMaterials();
 	for (int32 i = 0; i < CheckSlots.Num(); i++)
@@ -272,13 +271,12 @@ bool FMmdMaterialConversionTest::RunTest(const FString& Parameters)
 		const UMaterial* Parent = MI->GetMaterial();
 
 		// 変換側と同じ材料で方針を組み立て直す (UV 領域の測定込み)。
-		// 無加工版は変換が OrigColorTex に入れているので、そこから引く。
-		UTexture* OrigTexParam = nullptr;
-		MI->GetTextureParameterValue(FMaterialParameterInfo(TEXT("OrigColorTex")), OrigTexParam);
 		FMmdUvAlphaStats UvStats;
-		if (Info->OrigTexture >= 0)
+		if (Set.HasTexture(Info->OrigTexture))
 		{
-			if (UTexture2D* OrigTex2D = Cast<UTexture2D>(OrigTexParam))
+			UTexture2D* OrigTex2D = FMmdMaterialConversion::FindImportedTextureByImageName(
+				Set.TextureImageNames[Info->OrigTexture], PackagePath);
+			if (OrigTex2D != nullptr)
 			{
 				FMmdMaterialConversion::MeasureUvAlpha(Mesh, i, OrigTex2D, UvStats);
 			}
@@ -347,33 +345,20 @@ bool FMmdMaterialConversionTest::RunTest(const FString& Parameters)
 					TEXT("スロット '%s': alphaMode=%s alphaCutoff=%g なのにしきい値が %g (期待 %g)"),
 					*SlotName, *Info->AlphaMode, Info->AlphaCutoff, ActualCutoff, Plan.AlphaCutoff));
 			}
-
-			float ActualDither = -1.0f;
-			MI->GetScalarParameterValue(FMaterialParameterInfo(TEXT("DitherWeight")), ActualDither);
-			// 抽出に失敗するとプリベイク版へ倒れてディザも切れるので、上限だけを見る。
-			if (ActualDither > 0.5f && !Plan.bDither)
-			{
-				CutoffMismatched++;
-				AddError(FString::Printf(
-					TEXT("スロット '%s': 無加工版を使わないのにディザが入っている"), *SlotName));
-			}
-			if (ActualDither > 0.5f) DitherCount++;
 		}
 
-		// --- origTexture: OrigColorTex に無加工版が入り、UseOrigTexture が立っているか ---
+		// --- origTexture: BaseColorTex が無加工版に差し替わっているか ---
 		if (Plan.bUseOrigTexture)
 		{
 			WithOrigTexture++;
-			UTexture* OrigTex = nullptr;
-			MI->GetTextureParameterValue(FMaterialParameterInfo(TEXT("OrigColorTex")), OrigTex);
-			float UseOrig = 0.0f;
-			MI->GetScalarParameterValue(FMaterialParameterInfo(TEXT("UseOrigTexture")), UseOrig);
+			UTexture* BaseTex = nullptr;
+			MI->GetTextureParameterValue(FMaterialParameterInfo(TEXT("BaseColorTex")), BaseTex);
 
-			if (OrigTex != nullptr && Set.HasTexture(Info->OrigTexture))
+			if (BaseTex != nullptr && Set.HasTexture(Info->OrigTexture))
 			{
 				// アセット名は画像名のドットを '_' に置き換えたもの ("眼球４.bmp" → "眼球４_bmp")。
 				const FString WantName = Set.TextureImageNames[Info->OrigTexture].Replace(TEXT("."), TEXT("_"));
-				if (OrigTex->GetName().Equals(WantName, ESearchCase::IgnoreCase) && UseOrig > 0.5f)
+				if (BaseTex->GetName().Equals(WantName, ESearchCase::IgnoreCase))
 				{
 					OrigTextureApplied++;
 				}
@@ -381,8 +366,8 @@ bool FMmdMaterialConversionTest::RunTest(const FString& Parameters)
 				{
 					// 抽出に失敗するとプリベイク版のまま続行する仕様なので、警告に留める。
 					AddWarning(FString::Printf(
-						TEXT("スロット '%s': OrigColorTex が '%s' (期待 '%s') / UseOrigTexture=%g"),
-						*SlotName, *OrigTex->GetName(), *WantName, UseOrig));
+						TEXT("スロット '%s': BaseColorTex が '%s' で、無加工版 '%s' に差し替わっていません。"),
+						*SlotName, *BaseTex->GetName(), *WantName));
 				}
 			}
 		}
@@ -401,8 +386,7 @@ bool FMmdMaterialConversionTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("拡散色 (baseColorFactor) がマテリアルインスタンスに入っている"), ColorMismatched, 0);
 	AddInfo(FString::Printf(TEXT("ベーステクスチャを持たない材質: %d 件 (拡散色だけで色が決まる)"), TexturelessCount));
 	TestEqual(TEXT("不透明サブパス (TwoPass 相当) の重みが正しい"), SubpassMismatched, 0);
-	AddInfo(FString::Printf(TEXT("不透明サブパスを使う半透明材質: %d 件 / ディザで縁を柔らかくする材質: %d 件"),
-		SubpassCount, DitherCount));
+	AddInfo(FString::Printf(TEXT("不透明サブパスを使う半透明材質: %d 件"), SubpassCount));
 
 	if (WithOrigTexture > 0)
 	{

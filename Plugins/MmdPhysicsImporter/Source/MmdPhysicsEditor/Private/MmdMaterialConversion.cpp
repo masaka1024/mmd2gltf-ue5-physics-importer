@@ -15,7 +15,6 @@
 #include "Materials/MaterialExpressionCeil.h"
 #include "Materials/MaterialExpressionComponentMask.h"
 #include "Materials/MaterialExpressionConstant.h"
-#include "Materials/MaterialExpressionCustom.h"
 #include "Materials/MaterialExpressionSubtract.h"
 #include "Materials/MaterialExpressionDotProduct.h"
 #include "Materials/MaterialExpressionLinearInterpolate.h"
@@ -315,6 +314,11 @@ namespace
 //   この組はエクスポーター自身が「見た目ほぼ不透明」と分類したものなので採らなかった。
 //   本当に柔らかさが要る透け髪は alphaClass=="blend" 側 (Translucent) に来る。
 // ===========================================================================
+UTexture2D* FMmdMaterialConversion::FindImportedTextureByImageName(const FString& ImageName, const FString& PackagePath)
+{
+	return FindImportedTexture(ImageName, PackagePath);
+}
+
 bool FMmdMaterialConversion::MeasureUvAlpha(USkeletalMesh* Mesh, int32 SlotIndex, UTexture2D* Texture,
 	FMmdUvAlphaStats& OutStats)
 {
@@ -453,15 +457,6 @@ FMmdMaterialPlan FMmdMaterialConversion::PlanMaterial(const MmdMaterialInfo& Inf
 	//   移植元も Normal のままなので、素のアルファブレンドへ倒す。
 	Plan.bSubpassOpaque = Plan.bTranslucent && (Info.BaseColorTexture >= 0 || bHasOrigTexture);
 
-	// ★ディザは実機で不採用になった (2026-08-15)。
-	//   「Masked のまま深度を書き、縁だけ確率的に抜く」のは移植元 TwoPass の目的に
-	//   構造的には一致するが、**顔のような近距離の面では市松模様がそのまま見える**
-	//   (TemporalAA / TSR を入れた実機ビューポートで確認)。
-	//   代わりに Masked 側はプリベイク版を使う。プリベイク版は縁の画素が下地と
-	//   合成済みで、実測でも 3 方式のうち最も細く柔らかい縁になる。
-	//   マスターにパラメータは残してあるので、必要なら手動で 1 にして試せる。
-	Plan.bDither = false;
-
 	// alphaMode=OPAQUE はアルファを見ない (glTF の定義) ので負の値にする。
 	// MASK はテクスチャのアルファでしきい値カット (移植元 491 行の _Cutoff に相当)。
 	// ※以前はここを extras.mmd の alphaClass=="opaque" で判定しようとしていたが、
@@ -479,11 +474,11 @@ UMaterial* FMmdMaterialConversion::EnsureMasterMaterial(const FString& PackagePa
 	// 7.0: Translucent 版マスターを追加し、グラフ生成を共通化 (2026-08-14)。
 	// 8.0: BaseColor (glTF baseColorFactor = PMX の拡散色) を色とアルファに掛ける (2026-08-15)。
 	// 9.0: 半透明に不透明サブパス (lilToon TwoPass 相当) を入れる (2026-08-15)。
-	// 10.0: 方式を見比べられる検証台にする。プリベイク版/無加工版の両方を持たせ、
-	//       Masked 側にディザ、Translucent 側にサブパスを入れて、すべてパラメータで
-	//       切り替えられるようにした。マスク閾値も BasePropertyOverrides をやめて
-	//       マテリアルのパラメータへ移した (2026-08-15)。
-	static constexpr float KMasterVersion = 10.0f;
+	// 10.0: マスク閾値を BasePropertyOverrides からマテリアルのパラメータへ移した。
+	//       (値ごとに静的 permutation が増えるのを避けるため) (2026-08-15)。
+	// 11.0: 方式が決まったので検証用の分岐を削除。ディザと、プリベイク版/無加工版を
+	//       切り替えるための 2 枚目のサンプラを捨てた (2026-08-15)。
+	static constexpr float KMasterVersion = 11.0f;
 
 	const bool bTranslucent = (Variant == EMmdMasterVariant::Translucent);
 	const TCHAR* AssetName = MasterAssetName(Variant);
@@ -550,17 +545,11 @@ UMaterial* FMmdMaterialConversion::EnsureMasterMaterial(const FString& PackagePa
 	BaseTex->ParameterName = TEXT("BaseColorTex");
 	BaseTex->Texture = DefaultWhite;
 
-	// ★プリベイク前の無加工テクスチャ (extras.mmd の origTexture)。
-	//   プリベイク版と無加工版の**両方を常に持たせて**、UseOrigTexture で切り替える。
-	//   どちらが正解かはモデルと描き方で変わるので、アセットを作り直さずに
-	//   エディタ上で見比べられるようにしてある。
-	auto* OrigTex = MakeNode<UMaterialExpressionTextureSampleParameter2D>(Mat, -900, -150);
-	OrigTex->ParameterName = TEXT("OrigColorTex");
-	OrigTex->Texture = DefaultWhite;
-
-	auto* UseOrig = MakeNode<UMaterialExpressionScalarParameter>(Mat, -900, -250);
-	UseOrig->ParameterName = TEXT("UseOrigTexture");
-	UseOrig->DefaultValue = 0.0f;
+	// ★BaseColorTex にはプリベイク版と無加工版のどちらかが入る (どちらを使うかは
+	//   PlanMaterial が決める)。両方をサンプラで持って切り替える作りも試したが、
+	//   materials は 16 サンプラの上限があり、常時 1 枚余計に使うのは割に合わない。
+	//   判定を外したいときはインスタンスの BaseColorTex をもう一方のアセットへ
+	//   差し替えればよい (無加工版も取り込み済みなので選べる)。
 
 	// ★PMX の材質の拡散色 (glTF の baseColorFactor)。
 	//   テクスチャを持たない材質 (レンズ・金属パーツ・単色のベルト) はここにしか色が無いので、
@@ -667,15 +656,9 @@ UMaterial* FMmdMaterialConversion::EnsureMasterMaterial(const FString& PackagePa
 	Connect(SphereTex, TEXT("RGB"), SphereAddColor, TEXT("A"));
 	Connect(SphereAdd, TEXT(""), SphereAddColor, TEXT("B"));
 
-	// --- ベースカラー: プリベイク版 / 無加工版 を UseOrigTexture で選ぶ ---
-	auto* BaseRGB = MakeNode<UMaterialExpressionLinearInterpolate>(Mat, -430, 0);
-	Connect(BaseTex, TEXT("RGB"), BaseRGB, TEXT("A"));
-	Connect(OrigTex, TEXT("RGB"), BaseRGB, TEXT("B"));
-	Connect(UseOrig, TEXT(""), BaseRGB, TEXT("Alpha"));
-
 	// --- 合成: Base * BaseColor * Toon * SphereMul + SphereAdd ---
 	auto* Tinted = MakeNode<UMaterialExpressionMultiply>(Mat, -380, 60);
-	Connect(BaseRGB, TEXT(""), Tinted, TEXT("A"));
+	Connect(BaseTex, TEXT("RGB"), Tinted, TEXT("A"));
 	Connect(BaseColor, TEXT(""), Tinted, TEXT("B"));
 
 	auto* Lit = MakeNode<UMaterialExpressionMultiply>(Mat, -300, 100);
@@ -696,13 +679,8 @@ UMaterial* FMmdMaterialConversion::EnsureMasterMaterial(const FString& PackagePa
 	}
 	// アルファもテクスチャ × 拡散色のアルファ。テクスチャを持たない半透明材質
 	// (レンズ = 拡散色アルファ 0.7) は、既定の白テクスチャのアルファ 1 との積で 0.7 になる。
-	auto* BaseA = MakeNode<UMaterialExpressionLinearInterpolate>(Mat, -430, -60);
-	Connect(BaseTex, TEXT("A"), BaseA, TEXT("A"));
-	Connect(OrigTex, TEXT("A"), BaseA, TEXT("B"));
-	Connect(UseOrig, TEXT(""), BaseA, TEXT("Alpha"));
-
 	auto* AlphaMul = MakeNode<UMaterialExpressionMultiply>(Mat, -300, 0);
-	Connect(BaseA, TEXT(""), AlphaMul, TEXT("A"));
+	Connect(BaseTex, TEXT("A"), AlphaMul, TEXT("A"));
 	Connect(BaseColor, TEXT("A"), AlphaMul, TEXT("B"));
 
 	// ★半透明の「不透明サブパス」(移植元 lilToon の TwoPass 相当)。
@@ -727,69 +705,36 @@ UMaterial* FMmdMaterialConversion::EnsureMasterMaterial(const FString& PackagePa
 		// Masked 側のアルファ。しきい値は **マテリアルのパラメータ** で持つ。
 		//
 		// ★UE の OpacityMaskClipValue はインスタンスの BasePropertyOverrides なので、
-		//   値ごとに静的 permutation が増えるうえ、ディザと硬いカットで必要な値が違って
-		//   両立できない。そこでマスク側の判定を自前で作り、
-		//   マテリアルの OpacityMaskClipValue は 0.5 固定にする。
-		//     出力 > 0.5 なら描く、という約束にそろえてある。
+		//   値ごとに静的 permutation が増える。マスク判定を自前で作り、
+		//   マテリアルの OpacityMaskClipValue は 0.5 固定にして
+		//   「出力 > 0.5 なら描く」という約束にそろえてある。
 		//
-		//   硬いカット : RawA - AlphaCutoff + 0.5   → RawA > AlphaCutoff で描く
-		//   ディザ     : RawA - 市松パターン + 0.5  → RawA の確率で描く
+		//   RawA - AlphaCutoff + 0.5  → RawA > AlphaCutoff で描く
+		//   (AlphaCutoff が負なら常に描く = glTF の alphaMode=OPAQUE)
 		// ==============================================================
 		auto* CutoffParam = MakeNode<UMaterialExpressionScalarParameter>(Mat, -600, -60);
 		CutoffParam->ParameterName = TEXT("AlphaCutoff");
 		CutoffParam->DefaultValue = 0.5f;
 
-		auto* DitherWeight = MakeNode<UMaterialExpressionScalarParameter>(Mat, -600, -120);
-		DitherWeight->ParameterName = TEXT("DitherWeight");
-		DitherWeight->DefaultValue = 0.0f;
-
-		auto* HalfConst = MakeNode<UMaterialExpressionConstant>(Mat, -600, -180);
+		auto* HalfConst = MakeNode<UMaterialExpressionConstant>(Mat, -600, -120);
 		HalfConst->R = 0.5f;
 
-		// 硬いカット: RawA - AlphaCutoff + 0.5
 		auto* HardSub = MakeNode<UMaterialExpressionSubtract>(Mat, -260, -60);
 		Connect(AlphaMul, TEXT(""), HardSub, TEXT("A"));
 		Connect(CutoffParam, TEXT(""), HardSub, TEXT("B"));
 		auto* HardMask = MakeNode<UMaterialExpressionAdd>(Mat, -230, -60);
 		Connect(HardSub, TEXT(""), HardMask, TEXT("A"));
 		Connect(HalfConst, TEXT(""), HardMask, TEXT("B"));
-
-		// ★ディザ (移植元 lilToon の TwoPass = 深度を書きつつ縁を柔らかく、に対応する
-		//   UE 側の唯一の手段)。4x4 の市松パターンをフレームごとに位相をずらして返す。
-		//   TemporalAA / TSR が時間方向に均すことで、深度を書いたまま半透明に見える。
-		//
-		//   ★エンジンの DitherTemporalAA マテリアル関数は使わない。出力が
-		//     どのしきい値で切られる前提なのかがアセットの中にあって読めず、
-		//     「合っているか目視でしか分からない」状態になるため。ここでは HLSL を
-		//     自前で持ち、上の「> 0.5 なら描く」という約束に合わせてある。
-		auto* DitherPattern = MakeNode<UMaterialExpressionCustom>(Mat, -400, -180);
-		DitherPattern->Description = TEXT("MmdOrderedDither");
-		DitherPattern->OutputType = CMOT_Float1;
-		DitherPattern->Inputs.Empty();   // 既定の未接続入力を消しておかないとコンパイルが通らない
-		DitherPattern->Code = TEXT(
-			"uint2 P = (uint2)Parameters.SvPosition.xy;\n"
-			"uint F = View.StateFrameIndexMod8;\n"
-			"// フレームごとに位相をずらし、TemporalAA が時間方向に均せるようにする\n"
-			"uint X = (P.x + F * 2u) & 3u;\n"
-			"uint Y = (P.y + F * 3u) & 3u;\n"
-			"uint I = X + (Y << 2);\n"
-			"float B[16] = { 0,8,2,10, 12,4,14,6, 3,11,1,9, 15,7,13,5 };\n"
-			"return (B[I] + 0.5f) / 16.0f;\n");
-
-		auto* DitherSub = MakeNode<UMaterialExpressionSubtract>(Mat, -260, -180);
-		Connect(AlphaMul, TEXT(""), DitherSub, TEXT("A"));
-		Connect(DitherPattern, TEXT(""), DitherSub, TEXT("B"));
-		auto* DitherMask = MakeNode<UMaterialExpressionAdd>(Mat, -230, -180);
-		Connect(DitherSub, TEXT(""), DitherMask, TEXT("A"));
-		Connect(HalfConst, TEXT(""), DitherMask, TEXT("B"));
-
-		auto* MaskOut = MakeNode<UMaterialExpressionLinearInterpolate>(Mat, -110, -120);
-		Connect(HardMask, TEXT(""), MaskOut, TEXT("A"));
-		Connect(DitherMask, TEXT(""), MaskOut, TEXT("B"));
-		Connect(DitherWeight, TEXT(""), MaskOut, TEXT("Alpha"));
-		AlphaOut = MaskOut;
+		AlphaOut = HardMask;
 
 		Mat->OpacityMaskClipValue = 0.5f;
+
+		// ★ここに「ディザで縁を柔らかくする」経路も作って試したが、顔のような
+		//   近距離の面では市松模様がそのまま見えたため捨てた (実機で確認)。
+		//   移植元 lilToon の TwoPass (深度を書きつつ縁は柔らかい) に構造的には
+		//   一致するので発想としては筋が良いが、絵として使えない。
+		//   代わりに Masked 側はプリベイク版テクスチャを使う。プリベイク版は
+		//   縁の画素が下地と合成済みで、アルファテストで描く前提に作られている。
 	}
 	else
 	{
@@ -993,20 +938,16 @@ FMmdMaterialResult FMmdMaterialConversion::ConvertMaterials(USkeletalMesh* Mesh,
 		//   無加工版にしか残っていない (移植元 409〜415 行の注記)。
 		//   無加工版は標準マテリアルから参照されないので、Interchange では取り込まれず
 		//   FTextureResolver の抽出経路に乗る。
-		// プリベイク版と無加工版の**両方**を割り当て、どちらを使うかは
-		// UseOrigTexture パラメータで切り替える (見比べられるようにするため)。
-		if (PrebakedTexture != nullptr)
-		{
-			UMaterialEditingLibrary::SetMaterialInstanceTextureParameterValue(MI, TEXT("BaseColorTex"), PrebakedTexture);
-		}
-
-		bool bUseOrig = false;
+		// ★アルファテストで描く材質にはプリベイク版、実際にブレンドする材質には無加工版。
+		//   プリベイク版は縁の画素が下地と合成済みで、アルファテストで描く前提に
+		//   作られている (エクスポーターの _prebake_mask_alpha)。無加工版は合成前なので、
+		//   アルファテストで描くと縁の暗い画素がフルの濃さで出る。
+		UTexture2D* BaseTexture = PrebakedTexture;
 		if (Plan.bUseOrigTexture)
 		{
 			if (OrigTexture != nullptr)
 			{
-				UMaterialEditingLibrary::SetMaterialInstanceTextureParameterValue(MI, TEXT("OrigColorTex"), OrigTexture);
-				bUseOrig = true;
+				BaseTexture = OrigTexture;
 				Result.OrigTextureApplied++;
 			}
 			else
@@ -1018,13 +959,10 @@ FMmdMaterialResult FMmdMaterialConversion::ConvertMaterials(USkeletalMesh* Mesh,
 					*SlotName, Info->OrigTexture);
 			}
 		}
-		else if (OrigTexture != nullptr)
+		if (BaseTexture != nullptr)
 		{
-			// 使わない場合も割り当てだけしておく (エディタで切り替えて見比べられるように)。
-			UMaterialEditingLibrary::SetMaterialInstanceTextureParameterValue(MI, TEXT("OrigColorTex"), OrigTexture);
+			UMaterialEditingLibrary::SetMaterialInstanceTextureParameterValue(MI, TEXT("BaseColorTex"), BaseTexture);
 		}
-		UMaterialEditingLibrary::SetMaterialInstanceScalarParameterValue(MI, TEXT("UseOrigTexture"),
-			bUseOrig ? 1.0f : 0.0f);
 
 		// ★拡散色 (移植元 462〜463 行の _Color)。テクスチャ無しの材質はここにしか色が無い。
 		//   IA では mat11 (黒いベルト)・銀・髪止め・レンズ・mat7 の 5 材質が該当し、
@@ -1117,11 +1055,9 @@ FMmdMaterialResult FMmdMaterialConversion::ConvertMaterials(USkeletalMesh* Mesh,
 		else
 		{
 			// しきい値は BasePropertyOverrides ではなくマテリアルのパラメータで持つ
-			// (値ごとに静的 permutation が増えるのを避け、ディザと切り替えられるようにするため)。
+			// (値ごとに静的 permutation が増えるのを避けるため)。
 			UMaterialEditingLibrary::SetMaterialInstanceScalarParameterValue(MI, TEXT("AlphaCutoff"),
 				Plan.AlphaCutoff);
-			UMaterialEditingLibrary::SetMaterialInstanceScalarParameterValue(MI, TEXT("DitherWeight"),
-				(Plan.bDither && bUseOrig) ? 1.0f : 0.0f);
 		}
 
 		MI->PostEditChange();
