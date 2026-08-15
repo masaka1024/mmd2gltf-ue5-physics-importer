@@ -23,6 +23,14 @@
 //   参照されていないため、UE の Interchange ではアセット化されない。
 //   名前で見つからないものは GLB バイナリから直接取り出してアセット化する
 //   (MmdPhysics::GlbImageExtractor)。
+//
+// ★共有トゥーン (toon01〜toon10) は GLB にも入っていない (MMD 本体付属の画像を
+//   名前で指しているだけ)。解決は 3 段構え:
+//     1) 名前でプロジェクト全体を探す (最優先。あればこれまでと完全に同じ結果)
+//     2) 生成済みの近似ランプ T_MmdToonApproxXX
+//     3) 無ければ FMmdToonRamp が近似ランプを生成する (MmdToonRamp.h)
+//   3) に落ちても陰色付きのトゥーンにはなる。本家の色が要るときだけ
+//   toon01〜10 を取り込めばよい。
 // ===========================================================================
 
 #pragma once
@@ -147,6 +155,11 @@ struct MMDPHYSICSEDITOR_API FMmdMaterialResult
 	int32 ExtractedTextures = 0;
 	/** 輪郭線フラグ (PMX flags bit4) が立っている材質の数。 */
 	int32 WithOutline = 0;
+	/**
+	 * 共有トゥーン (toonXX) がプロジェクトに無く、近似ランプで代用した材質の数。
+	 * 本家の色が要る人向けの目印なので、エラーではなく情報として数えている。
+	 */
+	int32 ApproxToon = 0;
 	/** 2 パス目 (柔らかい毛先) が要る材質の数。 */
 	int32 SoftPass = 0;
 	FString Message;

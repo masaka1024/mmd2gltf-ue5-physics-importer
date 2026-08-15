@@ -32,6 +32,7 @@
 #include "IImageWrapperModule.h"
 #include "MmdGlbMaterialReader.h"
 #include "MmdPhysicsCoreLog.h"
+#include "MmdToonRamp.h"
 #include "ObjectTools.h"
 #include "Rendering/SkeletalMeshModel.h"
 #include "Rendering/SkeletalMeshLODModel.h"
@@ -1091,6 +1092,10 @@ FMmdMaterialResult FMmdMaterialConversion::ConvertMaterials(USkeletalMesh* Mesh,
 
 	Mesh->Modify();
 
+	// 近似ランプで代用したことを知らせるログは、トゥーン番号ごとに 1 回でよい
+	// (同じ toonXX を 20 材質が使うモデルで同じ行が 20 本並ぶのを避ける)。
+	TSet<int32> ApproxToonLogged;
+
 	for (int32 SlotIndex = 0; SlotIndex < Slots.Num(); SlotIndex++)
 	{
 		// スロット名 (= 取り込まれたマテリアル名) で extras.mmd 側の材質を引き当てる。
@@ -1195,7 +1200,8 @@ FMmdMaterialResult FMmdMaterialConversion::ConvertMaterials(USkeletalMesh* Mesh,
 				Info->BaseColorFactor[2], Info->BaseColorFactor[3]));
 
 		// トゥーン: 個別テクスチャがあればそれ。共有トゥーン (toon01..toon10) は GLB に入っていないので
-		// プロジェクト内をファイル名で探す (Unity 版と同じ制約。ユーザーが別途用意する)。
+		// プロジェクト内をファイル名で探し、無ければ近似ランプを生成して代用する
+		// (移植元 Unity 版は「見つからなければ陰なし」だった。そこだけ振る舞いを足してある)。
 		bool bHasToon = false;
 		if (Info->ToonTexture >= 0)
 		{
@@ -1213,19 +1219,48 @@ FMmdMaterialResult FMmdMaterialConversion::ConvertMaterials(USkeletalMesh* Mesh,
 		}
 		else if (Info->ToonShared >= 0)
 		{
+			// ★共有トゥーンの解決は 3 段構え。順番を崩さないこと。
+			//   1) 名前 toonXX でプロジェクト全体を探す (最優先)。
+			//      本家の画像を取り込んでいるプロジェクトでは、以前と完全に同じ結果になる。
+			//   2) 前回の変換で作った近似ランプ T_MmdToonApproxXX。
+			//   3) それも無ければ近似ランプを生成する (MmdToonRamp.h)。
+			//   ※ 2) と 3) は EnsureApproxToonTexture が「あれば再利用、無ければ生成」で
+			//      まとめて受け持つ (2 回目以降の変換でアセットを増殖させない)。
 			const FString SharedName = FString::Printf(TEXT("toon%02d"), Info->ToonShared + 1);
-			if (UTexture2D* T = FindImportedTexture(SharedName, PackagePath))
+			UTexture2D* Toon = FindImportedTexture(SharedName, PackagePath);
+			if (Toon == nullptr)
 			{
-				UMaterialEditingLibrary::SetMaterialInstanceTextureParameterValue(MI, TEXT("ToonTex"), T);
+				Toon = FMmdToonRamp::EnsureApproxToonTexture(Info->ToonShared, PackagePath);
+				if (Toon != nullptr)
+				{
+					Result.ApproxToon++;
+					// ★警告ではなく情報。共有トゥーンが無いのは異常ではなく既定の状態で、
+					//   これでも陰色付きのトゥーンにはなる。materials の数だけ並ばないよう
+					//   トゥーン番号ごとに 1 回だけ出す。
+					if (!ApproxToonLogged.Contains(Info->ToonShared))
+					{
+						ApproxToonLogged.Add(Info->ToonShared);
+						UE_LOG(LogMmdPhysics, Log,
+							TEXT("[MmdPhysics] '%s' がプロジェクトに見つからないため、")
+							TEXT("近似ランプ '%s' を生成して使用しました。")
+							TEXT("本家の色にしたい場合は %s をプロジェクトに取り込んでください ")
+							TEXT("(置き場所は自由。名前で自動検出します)。"),
+							*SharedName, *FMmdToonRamp::AssetNameFor(Info->ToonShared), *SharedName);
+					}
+				}
+			}
+
+			if (Toon != nullptr)
+			{
+				UMaterialEditingLibrary::SetMaterialInstanceTextureParameterValue(MI, TEXT("ToonTex"), Toon);
 				bHasToon = true;
 			}
 			else
 			{
-				// 共有トゥーンはモデルに同梱されない。無いことに気付けるよう名指しで出す
-				// (移植元 547 行の警告に相当)。
+				// 近似ランプの生成にも失敗した場合だけ警告 (アセットを作れない環境など)。
 				UE_LOG(LogMmdPhysics, Warning,
-					TEXT("[MmdPhysics] '%s': 共有トゥーン '%s' がプロジェクトに見つかりません。")
-					TEXT("MMD 標準の toon01〜toon10 を別途取り込んでください (置き場所は自由)。"),
+					TEXT("[MmdPhysics] '%s': 共有トゥーン '%s' が見つからず、近似ランプも生成できませんでした。")
+					TEXT("この材質は陰なしで描かれます。"),
 					*SlotName, *SharedName);
 			}
 		}
@@ -1355,9 +1390,10 @@ FMmdMaterialResult FMmdMaterialConversion::ConvertMaterials(USkeletalMesh* Mesh,
 	Result.bSuccess = Result.Converted > 0;
 	Result.Message = FString::Printf(
 		TEXT("マテリアルを変換しました: %d / %d スロット ")
-		TEXT("(半透明 %d〈うち昇格 %d・貼り付け材質 %d〉/ 無加工テクスチャ %d / GLB から抽出 %d / マスター: %s%s)"),
+		TEXT("(半透明 %d〈うち昇格 %d・貼り付け材質 %d〉/ 無加工テクスチャ %d / GLB から抽出 %d / ")
+		TEXT("近似トゥーン %d / マスター: %s%s)"),
 		Result.Converted, Result.Total, Result.Translucent, Result.Promoted, Result.Overlay,
-		Result.OrigTextureApplied, Result.ExtractedTextures, KMasterName,
+		Result.OrigTextureApplied, Result.ExtractedTextures, Result.ApproxToon, KMasterName,
 		Result.Translucent > 0 ? TEXT(" + M_MmdToonTranslucent") : TEXT(""));
 	UE_LOG(LogMmdPhysics, Log, TEXT("[MmdPhysics] %s"), *Result.Message);
 	return Result;
