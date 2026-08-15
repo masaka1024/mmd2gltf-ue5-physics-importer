@@ -43,8 +43,8 @@ public class MmdPhysicsEditor : ModuleRules
 			"PropertyEditor",
 			"DesktopPlatform",
 			"WorkspaceMenuStructure",
-			// 【2】マテリアル変換で GLB バイナリからテクスチャを直接デコードするのに使う
-			// （Interchange は glTF マテリアルから参照されていない画像をアセット化しない可能性があるため）。
+			// 材質が使う UV 領域のアルファ分布を測るのに、取り込んだ元画像 (FTextureSource) を
+			// 展開する必要がある。PNG のまま保持されているソースがあるため。
 			"ImageWrapper",
 		});
 	}
