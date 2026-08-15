@@ -65,6 +65,10 @@ public:
 	virtual void OnRegister() override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType,
 		FActorComponentTickFunction* ThisTickFunction) override;
+#if WITH_EDITOR
+	/** 詳細パネルで太さなどを触ったら、その場で材質へ流し込む。 */
+	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+#endif
 	//~ End UActorComponent
 
 private:

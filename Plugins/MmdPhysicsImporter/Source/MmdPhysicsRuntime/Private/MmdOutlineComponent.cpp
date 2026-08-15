@@ -114,6 +114,18 @@ void UMmdOutlineComponent::RebuildOutlineMaterials()
 	}
 }
 
+#if WITH_EDITOR
+void UMmdOutlineComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+
+	// ★材質は動的インスタンスなので、登録時に一度作って値を流し込んでいる。
+	//   詳細パネルで太さを触っても、ここで作り直さないと画面に反映されない。
+	//   太さは MMD と見比べて決める値なので、その場で効くことが要件。
+	RebuildOutlineMaterials();
+}
+#endif
+
 void UMmdOutlineComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	FActorComponentTickFunction* ThisTickFunction)
 {

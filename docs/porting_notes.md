@@ -118,7 +118,7 @@ git clone --depth 1 https://github.com/masaka1024/mmd2gltf-unity-physics-importe
 | `renderQueue`: mask 由来の昇格組 → AlphaTest 帯 `2452 + slotIdx` | 昇格させず Masked のまま置くことで代替。不透明パスなので必ず半透明より先に描かれ、深度も書く |
 | `renderQueue`: 真の半透明 → `3000 + slotIdx` | 不要。UE の半透明ソートキーは `Priority(16) → Distance(32) → MeshIdInPrimitive(16)` で、同一プリミティブのセクションは前 2 つが同値になるため最下位のセクション順（= スロット順）で決まる |
 | TransparentMode = TwoPass | 不透明度の付け替えで再現（下記）。適用条件も移植元と同じ「半透明かつテクスチャあり」 |
-| `flags` bit4 → `_UseOutline` / `_OutlineWidth` | **未対応**（README の既知の制限）。反転メッシュ法にはメッシュのセクション追加が要るため |
+| `flags` bit4 → `_UseOutline` / `_OutlineWidth` | `M_MmdOutline` + `UMmdOutlineComponent`（下記）。太さは `edgeSize × OutlineWidthScale`（既定 0.15。移植元は lilToon の `_OutlineWidth` 既定 0.08 に合わせた係数） |
 
 ブレンドモードは UE ではマテリアル単位の静的スイッチなので、1 枚のマスターでは両立できません
 （インスタンスの `BasePropertyOverrides` で上書きするとインスタンスごとに静的 permutation が増え、
@@ -274,6 +274,44 @@ lilToon ではほぼ不透明に描かれます。素のアルファブレンド
 作りも試しましたが、マテリアルには 16 サンプラの上限があり、常時 1 枚余計に使うのは
 割に合いません。判定を外したいときはインスタンスの `BaseColorTex` をもう一方のアセットへ
 差し替えられます（無加工版も取り込み済みなので選べます）。
+
+## 輪郭線はメッシュを複製せずに描く
+
+MMD の輪郭線は「モデルをもう一度、法線方向へ膨らませて表面を捨てて描く」反転ハルです。
+UE でも同じ描き方をしますが、**メッシュには一切手を入れません**。
+
+```
+SkeletalMeshActor
+├── SkeletalMeshComponent（本体）      … 物理 ABP が付く
+└── UMmdOutlineComponent（輪郭線）     … 同じスケルタルメッシュをもう一度描く
+    ├── SetLeaderPoseComponent(本体)   … ボーンは本体の結果をそのまま使う
+    ├── MorphTargetWeights を毎フレーム複製
+    └── 全スロットに M_MmdOutline の動的インスタンス
+```
+
+`M_MmdOutline`（Unlit / Masked / 両面）:
+
+| 出力 | 内容 |
+|---|---|
+| WorldPositionOffset | `VertexNormalWS × (EdgeSize × OutlineWidthScale)` |
+| OpacityMask | `saturate(-TwoSidedSign) × UseOutline` … 表面を落として裏面だけ残す |
+| EmissiveColor | `EdgeColor`（材質ごと） |
+
+★**セクションを複製して焼き込む方式は採りません。** MMD モデルは表情モーフを大量に持ちます
+（IA は全 19 セクションが 45 モーフ）。複製するとモーフのデルタまで作り直すことになり、
+しかも取り込んだアセットを書き換えるので**モデルを再インポートすると消えます**。
+同じメッシュを参照すればモーフは元のまま効き、ウェイトも `MorphTargetWeights` を
+配列ごとコピーするだけで揃います（同じメッシュなので添字が一致するため）。
+
+★**モーフだけは `LeaderPoseComponent` が運んでくれません**（ボーンだけです）。
+毎フレーム写さないと、表情を変えたときに輪郭線だけ元の顔のまま取り残されます。
+
+代償はメッシュ 1 体分の描画が増えることですが、これは反転ハルの原理的なコストで、
+MMD 自身も同じ枚数を描いています。
+
+★輪郭線マテリアルは**動的インスタンス**です（コンポーネントが登録時に作る）。
+そのため詳細パネルで太さを触っても自動では反映されず、`PostEditChangeProperty` で
+作り直しています。太さは MMD と見比べて決める値なので、その場で効くことが要件です。
 
 ## GLB バイナリからのテクスチャ抽出
 
