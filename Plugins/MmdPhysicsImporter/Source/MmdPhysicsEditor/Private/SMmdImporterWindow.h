@@ -29,6 +29,7 @@ private:
 	FReply OnBrowseGlb();
 	FReply OnWirePhysics();
 	FReply OnConvertMaterials();
+	FReply OnBuildActor();
 	bool CanWire() const;
 
 	TWeakObjectPtr<USkeletalMesh> TargetMesh;

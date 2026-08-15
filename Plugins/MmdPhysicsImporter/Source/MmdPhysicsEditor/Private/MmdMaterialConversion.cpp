@@ -821,7 +821,8 @@ UMaterial* FMmdMaterialConversion::EnsureMasterMaterial(const FString& PackagePa
 UMaterial* FMmdMaterialConversion::EnsureOutlineMaterial(const FString& PackagePath)
 {
 	// 輪郭線マスターの版。本体マスターとは別に持つ (グラフが別物なので)。
-	static constexpr float KOutlineVersion = 1.0f;
+	// 2.0: エッジ色のアルファを効かせるため Masked → Translucent (2026-08-15)。
+	static constexpr float KOutlineVersion = 2.0f;
 
 	const FString FullPath = PackagePath / KOutlineName + TEXT(".") + KOutlineName;
 	if (UMaterial* Existing = LoadObject<UMaterial>(nullptr, *FullPath, nullptr, LOAD_NoWarn | LOAD_Quiet))
@@ -857,16 +858,24 @@ UMaterial* FMmdMaterialConversion::EnsureOutlineMaterial(const FString& PackageP
 	//
 	// UE では次のように作る:
 	//   ・膨らませ  … WorldPositionOffset に 法線 × 太さ
-	//   ・表面を捨てる … TwoSidedSign が +1 (表) の画素を OpacityMask で落とす。
+	//   ・表面を捨てる … TwoSidedSign が +1 (表) の画素を Opacity 0 で落とす。
 	//                    残るのは膨らませた裏面 = シルエットの輪
 	//   ・色       … EmissiveColor に EdgeColor (Unlit なので陰影は付かない)
+	//   ・濃さ     … Opacity に EdgeColor のアルファ
+	//
+	// ★Translucent なのは **PMX のエッジ色がアルファを持つ**ため (IA は 0.6〜1.0)。
+	//   MMD はここをブレンドするので、Masked で不透明に描くと輪郭線が濃く出る。
+	//   半透明なので深度は書かないが、本体は不透明パスで深度を書いており、
+	//   輪郭線は膨らませた分だけ本体の外側にあるので前後関係は保たれる。
+	//   ★輪郭線は本体の半透明 (髪など) より先に描く必要があるので、
+	//     コンポーネント側で TranslucencySortPriority を下げている。
 	//
 	// ★メッシュは複製しない。同じスケルタルメッシュを参照する別コンポーネントに
 	//   このマテリアルを割り当てる (MmdOutlineComponent)。セクションを複製する方式だと
 	//   モーフのデルタまで作り直すことになり、しかも再インポートで消える。
 	// ===================================================================
 	Mat->SetShadingModel(MSM_Unlit);
-	Mat->BlendMode = BLEND_Masked;
+	Mat->BlendMode = BLEND_Translucent;
 	Mat->TwoSided = true;   // 裏面を描くので必須
 	{
 		bool bNeedsRecompile = false;
@@ -918,13 +927,18 @@ UMaterial* FMmdMaterialConversion::EnsureOutlineMaterial(const FString& PackageP
 	Connect(BackOnly, TEXT(""), MaskOut, TEXT("A"));
 	Connect(UseOutline, TEXT(""), MaskOut, TEXT("B"));
 
+	// PMX のエッジ色はアルファを持つ (IA は 0.6〜1.0)。MMD はこれでブレンドする。
+	auto* Opacity = MakeNode<UMaterialExpressionMultiply>(Mat, -300, 400);
+	Connect(MaskOut, TEXT(""), Opacity, TEXT("A"));
+	Connect(EdgeColor, TEXT("A"), Opacity, TEXT("B"));
+
 	if (!UMaterialEditingLibrary::ConnectMaterialProperty(EdgeColor, TEXT(""), MP_EmissiveColor))
 	{
 		UE_LOG(LogMmdPhysics, Error, TEXT("[MmdPhysics] 輪郭線: EmissiveColor への接続に失敗しました。"));
 	}
-	if (!UMaterialEditingLibrary::ConnectMaterialProperty(MaskOut, TEXT(""), MP_OpacityMask))
+	if (!UMaterialEditingLibrary::ConnectMaterialProperty(Opacity, TEXT(""), MP_Opacity))
 	{
-		UE_LOG(LogMmdPhysics, Error, TEXT("[MmdPhysics] 輪郭線: OpacityMask への接続に失敗しました。"));
+		UE_LOG(LogMmdPhysics, Error, TEXT("[MmdPhysics] 輪郭線: Opacity への接続に失敗しました。"));
 	}
 	if (!UMaterialEditingLibrary::ConnectMaterialProperty(Offset, TEXT(""), MP_WorldPositionOffset))
 	{

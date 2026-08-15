@@ -453,7 +453,8 @@ $env:MMD_CONV_SKELMESH = "/Game/IA/IA"
 | `MmdPhysics.Bridge.UeSpace` | 位置と回転が同一の純回転か（行列式 +1） |
 | `MmdPhysics.Bridge.ImportConvention` | 実際に取り込んだスケルトンと座標系が合うか |
 | `MmdPhysics.Editor.WirePhysics` | 配線 → 評価 → 書き戻しが端から端まで通るか |
-| `MmdPhysics.Editor.ConvertMaterials` | 全スロットに MI が付くか、半透明にすべき材質だけが Translucent 親か、マスク閾値が `alphaCutoff` と一致するか、`origTexture` が無加工版へ差し替わっているか |
+| `MmdPhysics.Editor.ConvertMaterials` | 全スロットに MI が付くか、半透明にすべき材質だけが Translucent 親か、マスク閾値が `alphaCutoff` と一致するか、`origTexture` が無加工版へ差し替わっているか、輪郭線フラグが入っているか |
+| `MmdPhysics.Editor.BuildActor` | 生成した Blueprint に本体と輪郭線コンポーネントが入っているか、作り直しても増殖しないか |
 
 ### 自動化していない部分
 

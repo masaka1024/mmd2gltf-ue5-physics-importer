@@ -23,6 +23,10 @@ UMmdOutlineComponent::UMmdOutlineComponent()
 	CastShadow = false;
 	// ボーンは本体から貰うので、自分でアニメーションは評価しない。
 	SetAnimationMode(EAnimationMode::AnimationCustomMode);
+	// ★輪郭線は半透明 (エッジ色のアルファを効かせるため)。本体の半透明 (髪など) より
+	//   先に描かないと、髪の上に輪郭線が乗る。膨らませた輪郭線は常に本体の外側なので
+	//   先に描くのが正しい。
+	SetTranslucentSortPriority(-1);
 	VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::OnlyTickPoseWhenRendered;
 }
 

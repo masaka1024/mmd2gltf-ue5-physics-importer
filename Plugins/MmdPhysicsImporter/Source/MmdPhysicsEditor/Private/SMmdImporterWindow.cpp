@@ -2,6 +2,7 @@
 
 #include "SMmdImporterWindow.h"
 
+#include "MmdActorBuilder.h"
 #include "MmdPhysicsWiring.h"
 #include "MmdMaterialConversion.h"
 #include "Engine/SkeletalMesh.h"
@@ -137,12 +138,47 @@ void SMmdImporterWindow::Construct(const FArguments& InArgs)
 						TEXT("alphaMode=BLEND の材質は M_MmdToonTranslucent (半透明) の方から作ります。")
 						TEXT("共有トゥーン (toon01〜toon10) はモデルに含まれないので、")
 						TEXT("別途プロジェクトへ取り込んでください (名前でプロジェクト全体から探します)。")
-						TEXT("アウトラインは未対応です。"),
+						TEXT("輪郭線を描く材質があれば M_MmdOutline も作ります。"),
 						TEXT("Creates the M_MmdToon master material and one instance per MMD material. ")
 						TEXT("Unlit with a hand-built N·L toon ramp; sphere maps (multiply/add) are supported. ")
 						TEXT("Materials with alphaMode=BLEND are instanced from M_MmdToonTranslucent instead. ")
 						TEXT("Shared toons (toon01..toon10) are not bundled with the model - import them into the ")
-						TEXT("project yourself and they will be found by name. Outlines are not supported yet."));
+						TEXT("project yourself and they will be found by name. ")
+						TEXT("M_MmdOutline is also created when any material draws an outline."));
+				})
+			]
+
+			// --- 【3】アクターを生成 ---
+			+ SVerticalBox::Slot().AutoHeight().Padding(0, 8, 0, 4)
+			[
+				SNew(SButton)
+				.HAlign(HAlign_Center)
+				.IsEnabled_Lambda([this]() { return TargetMesh.IsValid(); })
+				.OnClicked(this, &SMmdImporterWindow::OnBuildActor)
+				[
+					SNew(STextBlock)
+					.Text_Lambda([this]()
+					{
+						return L(TEXT("3. アクターを生成 (本体 + 輪郭線)"), TEXT("3. Build Actor (body + outline)"));
+					})
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
+			[
+				SNew(STextBlock)
+				.AutoWrapText(true)
+				.Text_Lambda([this]()
+				{
+					return L(
+						TEXT("BP_<メッシュ名> という Blueprint アクターを作ります。")
+						TEXT("スケルタルメッシュと、輪郭線コンポーネント (MmdOutlineComponent) を組んだ状態で出てきます。")
+						TEXT("これをレベルへ置けば、物理も輪郭線も効いた状態になります。")
+						TEXT("輪郭線を描く材質が無いモデルには輪郭線コンポーネントを付けません。")
+						TEXT("【2】のあとに実行してください (輪郭線の有無をマテリアルから見るため)。"),
+						TEXT("Creates a Blueprint actor named BP_<MeshName> with the skeletal mesh and the outline ")
+						TEXT("component (MmdOutlineComponent) already wired up. Drop it into a level and both the ")
+						TEXT("physics and the outline are active. The outline component is skipped for models that ")
+						TEXT("draw no outlines. Run this after step 2 (it reads the outline flag from the materials)."));
 				})
 			]
 
@@ -211,6 +247,14 @@ FReply SMmdImporterWindow::OnWirePhysics()
 FReply SMmdImporterWindow::OnConvertMaterials()
 {
 	const FMmdMaterialResult Result = FMmdMaterialConversion::ConvertMaterials(TargetMesh.Get(), GlbPath);
+	StatusText = Result.Message;
+	bStatusIsError = !Result.bSuccess;
+	return FReply::Handled();
+}
+
+FReply SMmdImporterWindow::OnBuildActor()
+{
+	const FMmdActorResult Result = FMmdActorBuilder::BuildActor(TargetMesh.Get());
 	StatusText = Result.Message;
 	bStatusIsError = !Result.bSuccess;
 	return FReply::Handled();

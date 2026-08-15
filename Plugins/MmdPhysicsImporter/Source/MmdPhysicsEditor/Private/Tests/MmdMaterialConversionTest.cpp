@@ -415,7 +415,8 @@ bool FMmdMaterialConversionTest::RunTest(const FString& Parameters)
 		UMaterial* Outline = LoadObject<UMaterial>(nullptr, *OutlinePath, nullptr, LOAD_NoWarn | LOAD_Quiet);
 		if (TestNotNull(TEXT("輪郭線マスターが生成されている"), Outline))
 		{
-			TestEqual(TEXT("輪郭線マスターは Masked"), (int32)Outline->BlendMode, (int32)BLEND_Masked);
+			// エッジ色のアルファ (PMX の値。IA は 0.6〜1.0) を効かせるため半透明。
+			TestEqual(TEXT("輪郭線マスターは Translucent"), (int32)Outline->BlendMode, (int32)BLEND_Translucent);
 			TestTrue(TEXT("輪郭線マスターは両面 (裏面を描くため)"), Outline->TwoSided);
 		}
 	}
