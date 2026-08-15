@@ -49,6 +49,13 @@ namespace
 	const TCHAR* KOutlineName = TEXT("M_MmdOutline");
 
 	/**
+	 * lilToon の _SubpassCutoff と同じ既定値。
+	 * 1 パス目 (Masked) がここ以上のαを不透明で描き、深度を書く。
+	 * 残り (毛先) は 2 パス目 (UMmdSoftPassComponent) がブレンドする。
+	 */
+	constexpr float KSubpassCutoff = 0.5f;
+
+	/**
 	 * GLB から取り出したテクスチャの置き場 (モデルのフォルダ配下)。
 	 * 移植元 Unity 版の "MMD_ExtractedTextures" と同じ名前にしてある。
 	 */
@@ -451,14 +458,45 @@ FMmdMaterialPlan FMmdMaterialConversion::PlanMaterial(const MmdMaterialInfo& Inf
 	//       平均明度 92 (プリベイク) に対し 56 (無加工)、最大差 151
 	//   つまり無加工版は**アルファブレンド専用**。硬いアルファテストで描くと
 	//   縁の暗い画素がフルの濃さで出る (実機で眉・目の輪郭の黒フチとして現れた)。
-	//   実際にブレンドできる材質 (Translucent) にだけ入れる。
-	Plan.bUseOrigTexture = bHasOrigTexture && Plan.bTranslucent;
+	//   ★2 パス目を持つ材質にも入れる。1 パス目は α >= 0.5 の芯だけを描き、
+	//     問題になる縁 (α < 0.5) は 2 パス目がブレンドで受け持つため。
+	//     しきい値 0.1 で全部を硬く描いていたのが黒フチの原因だった。
+	//   (この行は bSoftPass が決まったあとで上書きする。下を参照)
 
-	// ★不透明サブパス (lilToon TwoPass 相当) を使うか。
+	// ★lilToon の TwoPass 相当を使うか。
 	//   移植元 434 行の `if (modeInt == 2 && (hasBaseTex || useOrigTexture)) transparentMode = 2;`
 	//   と同じ条件。テクスチャを持たない半透明 (レンズのような単色ガラス) は
-	//   移植元も Normal のままなので、素のアルファブレンドへ倒す。
-	Plan.bSubpassOpaque = Plan.bTranslucent && (Info.BaseColorTexture >= 0 || bHasOrigTexture);
+	//   移植元も Normal のままなので、素のアルファブレンドのままにする。
+	//
+	// ★ただし**貼り付け材質 (眉・まつげ・額の影) には使わない**。
+	//   TwoPass の 1 パス目は α >= 0.5 を **生の色のまま不透明** で塗る。眉のように
+	//   0.5〜0.7 の薄い墨で描かれたものがそこに入ると濃さが戻り、黒フチとして出る
+	//   (実機で確認)。lilToon の TwoPass 自体がこの帯を濃くする近似で、
+	//   **MMD は全部を素のアルファでブレンドしている**。目標は MMD なので眉は素直に混ぜる。
+	//
+	//   髪と眉で必要な処理が違う理由:
+	//     髪 … 房が何枚も重なる。芯で深度を書かないと足し算で飽和する → TwoPass が要る
+	//     眉 … 顔に貼り付いた 1 枚で自分同士は重ならない。下地の顔が不透明で深度を書く
+	//           → 素のブレンドで安全、かつ MMD と同じ絵になる
+	Plan.bSubpassOpaque = Plan.bTranslucent && !Plan.bOverlay
+		&& (Info.BaseColorTexture >= 0 || bHasOrigTexture);
+
+	// ★TwoPass は 2 回描かないと成立しない。
+	//     1 パス目 … α >= 0.5 を不透明で描き、深度も書く → **本体を Masked にする**
+	//     2 パス目 … 全面を素のαでブレンド              → UMmdSoftPassComponent
+	//   UE のマテリアルは 1 枚で 2 パスを持てない (Masked と Translucent は排他) ため、
+	//   本体は Masked に倒し、半透明側は別コンポーネントに任せる。
+	//
+	//   ★これを 1 枚で済ませようとして失敗した経緯:
+	//     ・全部 Translucent + 不透明度の付け替え → 深度を書けず、房が重なると
+	//       足し算で飽和してグラデーションが潰れる
+	//     ・Translucent + "Output Depth and Velocity" → しきい値が深度書き込みに効かず、
+	//       毛先まで深度を書いて奥の髪が消え、背景が透ける
+	//     ・Masked + ディザ → 近距離で市松模様が見える
+	Plan.bSoftPass = Plan.bSubpassOpaque;
+
+	// 無加工版は「実際にブレンドする材質」に入れる = 半透明 or 2 パス目を持つもの。
+	Plan.bUseOrigTexture = bHasOrigTexture && (Plan.bTranslucent || Plan.bSoftPass);
 
 	// alphaMode=OPAQUE はアルファを見ない (glTF の定義) ので負の値にする。
 	// MASK はテクスチャのアルファでしきい値カット (移植元 491 行の _Cutoff に相当)。
@@ -466,6 +504,13 @@ FMmdMaterialPlan FMmdMaterialConversion::PlanMaterial(const MmdMaterialInfo& Inf
 	//   alphaClass はプリベイク前の分類であって glTF のブレンド指定ではないので、
 	//   しきい値の判断には glTF 側の alphaMode を使う。
 	Plan.AlphaCutoff = bMaskMode ? Info.EffectiveAlphaCutoff() : -1.0f;
+
+	if (Plan.bSoftPass)
+	{
+		// 本体は 1 パス目 (Masked) を担当する。しきい値は lilToon の _SubpassCutoff と同じ。
+		Plan.bTranslucent = false;
+		Plan.AlphaCutoff = KSubpassCutoff;
+	}
 
 	return Plan;
 }
@@ -482,7 +527,12 @@ UMaterial* FMmdMaterialConversion::EnsureMasterMaterial(const FString& PackagePa
 	// 11.0: 方式が決まったので検証用の分岐を削除。ディザと、プリベイク版/無加工版を
 	//       切り替えるための 2 枚目のサンプラを捨てた (2026-08-15)。
 	// 12.0: 輪郭線フラグ (UseOutline) を持たせた。描くのは MmdOutlineComponent (2026-08-15)。
-	static constexpr float KMasterVersion = 12.0f;
+	// 13.0: 半透明マスターで "Output Depth and Velocity" を試したが、しきい値が深度書き込みに
+	//       効かず毛先まで深度を書いてしまうため撤回 (2026-08-15)。
+	// 14.0: lilToon TwoPass を 2 コンポーネントで再現。テクスチャを持つ半透明は本体を
+	//       Masked (1 パス目) にし、2 パス目は UMmdSoftPassComponent が描く。
+	//       その印として SoftPass パラメータを追加 (2026-08-15)。
+	static constexpr float KMasterVersion = 14.0f;
 
 	const bool bTranslucent = (Variant == EMmdMasterVariant::Translucent);
 	const TCHAR* AssetName = MasterAssetName(Variant);
@@ -527,6 +577,16 @@ UMaterial* FMmdMaterialConversion::EnsureMasterMaterial(const FString& PackagePa
 	//   しきい値で切り抜かれ、移植元 Unity 版と見た目が食い違っていた。
 	Mat->BlendMode = bTranslucent ? BLEND_Translucent : BLEND_Masked;
 	Mat->TwoSided = true;   // MMD は両面材質が多い。個別制御はインスタンスの上書きで行う。
+
+	// ★試して捨てた案 — "Output Depth and Velocity" (bOutputTranslucentVelocity)。
+	//   半透明でも深度バッファへ書けるので、移植元 lilToon の TwoPass
+	//   (α >= _SubpassCutoff を深度に書く) を再現できると考えて入れたが、外した。
+	//
+	//   しきい値 (OpacityMaskClipValue) が効くのは **速度ベクトルの出力** だけで、
+	//   深度書き込みには効かない。α の薄い毛先まで深度を書いてしまい、その奥にある
+	//   髪が全部消えて**背景が透けて見える**(IA の毛束で実機確認)。
+	//   「α がしきい値以上のところだけ深度を書く」という制御ができないため、
+	//   TwoPass の代わりにはならない。
 
 	// ★使用フラグを必ず立てる。
 	//   bUsedWithSkeletalMesh が無いと、UE はスケルタルメッシュ上でこのマテリアルを使えず
@@ -598,6 +658,12 @@ UMaterial* FMmdMaterialConversion::EnsureMasterMaterial(const FString& PackagePa
 	auto* UseOutline = MakeNode<UMaterialExpressionScalarParameter>(Mat, -1300, 1100);
 	UseOutline->ParameterName = TEXT("UseOutline");
 	UseOutline->DefaultValue = 0.0f;
+
+	// 2 パス目 (柔らかい毛先) が要る材質かどうかの印。
+	// グラフには繋がない。UMmdSoftPassComponent がこれを見て描くかどうかを決める。
+	auto* SoftPass = MakeNode<UMaterialExpressionScalarParameter>(Mat, -1300, 1200);
+	SoftPass->ParameterName = TEXT("SoftPass");
+	SoftPass->DefaultValue = 0.0f;
 
 	auto* One = MakeNode<UMaterialExpressionConstant>(Mat, -600, 300);
 	One->R = 1.0f;
@@ -1202,6 +1268,11 @@ FMmdMaterialResult FMmdMaterialConversion::ConvertMaterials(USkeletalMesh* Mesh,
 			Info->HasEdge() ? 1.0f : 0.0f);
 		if (Info->HasEdge()) Result.WithOutline++;
 
+		// 2 パス目 (柔らかい毛先) が要るかの印。描くのは UMmdSoftPassComponent。
+		UMaterialEditingLibrary::SetMaterialInstanceScalarParameterValue(MI, TEXT("SoftPass"),
+			Plan.bSoftPass ? 1.0f : 0.0f);
+		if (Plan.bSoftPass) Result.SoftPass++;
+
 		// --- 描画設定の上書き ---
 		MI->BasePropertyOverrides.bOverride_TwoSided = true;
 		MI->BasePropertyOverrides.TwoSided = Info->bDoubleSided || Info->IsDoubleSidedFlag();
@@ -1227,11 +1298,20 @@ FMmdMaterialResult FMmdMaterialConversion::ConvertMaterials(USkeletalMesh* Mesh,
 		Slots[SlotIndex].MaterialInterface = MI;
 		Result.Converted++;
 		if (bTranslucent) Result.Translucent++;
-		if (bTranslucent && Plan.bPromotedByOrigTexture) Result.Promoted++;
-		if (bTranslucent && Plan.bOverlay) Result.Overlay++;
+		// ★昇格・貼り付けの判定は「半透明として扱う」という意味で、本体が Masked でも成立する
+		//   (TwoPass の 1 パス目は Masked、2 パス目が半透明)。半透明かどうかで数えないこと。
+		if (Plan.bPromotedByOrigTexture) Result.Promoted++;
+		if (Plan.bOverlay) Result.Overlay++;
 	}
 
 	Result.ExtractedTextures = Textures.NumExtracted();
+
+	// ★2 パス目を使う材質があるなら、本体が全部 Masked でも半透明マスターは要る。
+	//   UMmdSoftPassComponent がこれを親にして 2 パス目を描くため。
+	if (Result.SoftPass > 0)
+	{
+		GetTranslucentMaster();
+	}
 
 	// 輪郭線を描く材質があるモデルでだけ、輪郭線マスターを用意する。
 	// 実際に描くのは UMmdOutlineComponent (アクター側) なので、ここでは素材を置くだけ。

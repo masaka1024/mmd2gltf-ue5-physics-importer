@@ -5,76 +5,8 @@
 #include "Engine/SkeletalMesh.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
-#include "UObject/ConstructorHelpers.h"
 
-UMmdOutlineComponent::UMmdOutlineComponent()
-{
-	// モーフのウェイトを本体から写すために毎フレーム回す。
-	PrimaryComponentTick.bCanEverTick = true;
-	// ★本体の後に回さないと、1 フレーム古いウェイトを写してしまう。
-	PrimaryComponentTick.TickGroup = TG_PostPhysics;
-	// エディタのビューポートでも回す (表情を動かしたとき輪郭線も追従させるため)。
-	bTickInEditor = true;
-
-	// 輪郭線は見た目だけの存在。当たり判定も影も持たせない。
-	SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	SetGenerateOverlapEvents(false);
-	bCastDynamicShadow = false;
-	CastShadow = false;
-	// ボーンは本体から貰うので、自分でアニメーションは評価しない。
-	SetAnimationMode(EAnimationMode::AnimationCustomMode);
-	// ★輪郭線は半透明 (エッジ色のアルファを効かせるため)。本体の半透明 (髪など) より
-	//   先に描かないと、髪の上に輪郭線が乗る。膨らませた輪郭線は常に本体の外側なので
-	//   先に描くのが正しい。
-	SetTranslucentSortPriority(-1);
-	VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::OnlyTickPoseWhenRendered;
-}
-
-USkeletalMeshComponent* UMmdOutlineComponent::FindLeader() const
-{
-	// 親コンポーネント → 同じアクターの最初のスケルタルメッシュ、の順で探す。
-	if (USkeletalMeshComponent* Parent = Cast<USkeletalMeshComponent>(GetAttachParent()))
-	{
-		return Parent;
-	}
-	if (AActor* Owner = GetOwner())
-	{
-		TArray<USkeletalMeshComponent*> Components;
-		Owner->GetComponents(Components);
-		for (USkeletalMeshComponent* Comp : Components)
-		{
-			if (Comp != this && !Comp->IsA<UMmdOutlineComponent>())
-			{
-				return Comp;
-			}
-		}
-	}
-	return nullptr;
-}
-
-void UMmdOutlineComponent::OnRegister()
-{
-	Super::OnRegister();
-
-	USkeletalMeshComponent* Leader = FindLeader();
-	if (Leader == nullptr) return;
-
-	// 同じメッシュを描く。これでモーフもボーン構成も本体と完全に一致する。
-	if (GetSkeletalMeshAsset() != Leader->GetSkeletalMeshAsset())
-	{
-		SetSkeletalMeshAsset(Leader->GetSkeletalMeshAsset());
-	}
-
-	// ボーンは本体の結果 (MMD 物理を通したもの) をそのまま使う。
-	if (LeaderPoseComponent.Get() != Leader)
-	{
-		SetLeaderPoseComponent(Leader);
-	}
-
-	RebuildOutlineMaterials();
-}
-
-void UMmdOutlineComponent::RebuildOutlineMaterials()
+void UMmdOutlineComponent::RebuildMaterials()
 {
 	USkeletalMeshComponent* Leader = FindLeader();
 	USkeletalMesh* Mesh = GetSkeletalMeshAsset();
@@ -83,16 +15,18 @@ void UMmdOutlineComponent::RebuildOutlineMaterials()
 	UMaterialInterface* Master = OutlineMaterial;
 	if (Master == nullptr)
 	{
-		// マテリアル変換がメッシュと同じフォルダに作る。
-		const FString Folder = FPackageName::GetLongPackagePath(Mesh->GetOutermost()->GetName());
-		const FString Path = Folder / TEXT("M_MmdOutline.M_MmdOutline");
-		Master = LoadObject<UMaterialInterface>(nullptr, *Path, nullptr, LOAD_NoWarn | LOAD_Quiet);
+		Master = FindMasterMaterial(TEXT("M_MmdOutline"));
 	}
 	if (Master == nullptr)
 	{
 		// 素材が無ければ何もしない。輪郭線が出ないだけで本体には影響しない。
 		return;
 	}
+
+	// ★輪郭線は半透明 (エッジ色のアルファを効かせるため)。本体の半透明 (髪など) より
+	//   先に描かないと、髪の上に輪郭線が乗る。膨らませた輪郭線は常に本体の外側なので
+	//   先に描くのが正しい。
+	SetTranslucentSortPriority(-1);
 
 	const int32 NumSlots = Mesh->GetMaterials().Num();
 	for (int32 Slot = 0; Slot < NumSlots; Slot++)
@@ -109,42 +43,16 @@ void UMmdOutlineComponent::RebuildOutlineMaterials()
 			Body->GetScalarParameterValue(FMaterialParameterInfo(TEXT("UseOutline")), UseOutline);
 		}
 
+		const bool bDraw = bDrawOutline && UseOutline > 0.5f;
+		// 描かないセクションは丸ごと非表示にする (透明なマテリアルで描くより軽い)。
+		ShowMaterialSection(Slot, Slot, bDraw, 0);
+		if (!bDraw) continue;
+
 		UMaterialInstanceDynamic* Mid = CreateDynamicMaterialInstance(Slot, Master);
 		if (Mid == nullptr) continue;
 		Mid->SetVectorParameterValue(TEXT("EdgeColor"), EdgeColor);
 		Mid->SetScalarParameterValue(TEXT("EdgeSize"), EdgeSize);
 		Mid->SetScalarParameterValue(TEXT("OutlineWidthScale"), OutlineWidthScale);
-		Mid->SetScalarParameterValue(TEXT("UseOutline"), (bDrawOutline && UseOutline > 0.5f) ? 1.0f : 0.0f);
-	}
-}
-
-#if WITH_EDITOR
-void UMmdOutlineComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
-{
-	Super::PostEditChangeProperty(PropertyChangedEvent);
-
-	// ★材質は動的インスタンスなので、登録時に一度作って値を流し込んでいる。
-	//   詳細パネルで太さを触っても、ここで作り直さないと画面に反映されない。
-	//   太さは MMD と見比べて決める値なので、その場で効くことが要件。
-	RebuildOutlineMaterials();
-}
-#endif
-
-void UMmdOutlineComponent::TickComponent(float DeltaTime, ELevelTick TickType,
-	FActorComponentTickFunction* ThisTickFunction)
-{
-	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
-
-	// ★モーフだけは LeaderPoseComponent が運んでくれない (ボーンだけ)。
-	//   同じメッシュを参照しているので、ウェイトの配列は添字がそのまま一致する。
-	//   ここを写さないと、表情を変えたときに輪郭線だけ元の顔のまま取り残される。
-	if (USkeletalMeshComponent* Leader = FindLeader())
-	{
-		if (Leader->GetSkeletalMeshAsset() == GetSkeletalMeshAsset()
-			&& Leader->MorphTargetWeights.Num() == MorphTargetWeights.Num())
-		{
-			MorphTargetWeights = Leader->MorphTargetWeights;
-			ActiveMorphTargets = Leader->ActiveMorphTargets;
-		}
+		Mid->SetScalarParameterValue(TEXT("UseOutline"), 1.0f);
 	}
 }

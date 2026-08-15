@@ -117,7 +117,7 @@ git clone --depth 1 https://github.com/masaka1024/mmd2gltf-unity-physics-importe
 | `origTexture` による MASK→Transparent 昇格 | **`alphaClass=="blend"` のものだけ**昇格させる（下記） |
 | `renderQueue`: mask 由来の昇格組 → AlphaTest 帯 `2452 + slotIdx` | 昇格させず Masked のまま置くことで代替。不透明パスなので必ず半透明より先に描かれ、深度も書く |
 | `renderQueue`: 真の半透明 → `3000 + slotIdx` | 不要。UE の半透明ソートキーは `Priority(16) → Distance(32) → MeshIdInPrimitive(16)` で、同一プリミティブのセクションは前 2 つが同値になるため最下位のセクション順（= スロット順）で決まる |
-| TransparentMode = TwoPass | 不透明度の付け替えで再現（下記）。適用条件も移植元と同じ「半透明かつテクスチャあり」 |
+| TransparentMode = TwoPass | コンポーネントを 2 つ使って再現（下記）。ただし髪だけに適用し、貼り付け材質（眉）は素のブレンド |
 | `flags` bit4 → `_UseOutline` / `_OutlineWidth` | `M_MmdOutline` + `UMmdOutlineComponent`（下記）。太さは `edgeSize × OutlineWidthScale`（既定 0.15。移植元は lilToon の `_OutlineWidth` 既定 0.08 に合わせた係数） |
 
 ブレンドモードは UE ではマテリアル単位の静的スイッチなので、1 枚のマスターでは両立できません
@@ -213,7 +213,7 @@ UE 版は `"mask"` 側を Masked（アルファテスト）に残すので、そ
 市松模様がそのまま見えた**ため捨てました（TemporalAA を有効にしたビューポートで確認）。
 コードは残していません。再挑戦するなら、この結果を踏まえて別の手を考えてください。
 
-## TwoPass（不透明サブパス）は「不透明度の付け替え」で再現する
+## TwoPass はコンポーネントを 2 つ使って再現する
 
 lilToon の TwoPass は 2 パス構成で、1 パス目が**フルカラー・深度書き込みで α をクリップ**します。
 
@@ -225,30 +225,48 @@ clip(alphaRef - _SubpassCutoff);   // _SubpassCutoff の既定は 0.5
 `lts_twotrans.shader` の `_PreZWrite = 1` / `_PreColorMask = 15`、SubShader のキューも
 `"AlphaTest+10"`。つまり **α ≥ 0.5 の部分は完全な不透明として描かれ**、0.5 未満だけがブレンドされます。
 
-UE のマテリアルは 1 パスしか持てないので、同じ見え方を不透明度の付け替えで作ります。
+**UE のマテリアルは 1 枚で 2 パスを持てません**（Masked と Translucent は排他）。
+そこで **2 つのコンポーネントに分けて 2 回描きます**。
 
 ```
-α >= SubpassCutoff → 1.0    (サブパスが不透明で描いた分)
-α <  SubpassCutoff → α      (ブレンドパスの分)
+本体 SkeletalMeshComponent  … Masked (α >= 0.5 の芯 + 深度)      ← 1 パス目
+└─ UMmdSoftPassComponent    … 同じメッシュを Translucent で素のα ← 2 パス目
 ```
 
-1 層なら lilToon と同じ結果です（サブパスが塗った色の上に同じ色を混ぜても変わらないため）。
-マスターの `SubpassCutoff`（既定 0.5）と `SubpassWeight`（0/1）で制御します。
+2 パス目は「α < 0.5 だけ」に絞る必要はありません。α ≥ 0.5 の部分は 1 パス目が既に同じ色で
+不透明に塗っているので、上から同じ色を重ねても変わらないためです（絞ると毛先が本来より濃くなります）。
+新しいマテリアルも不要で、既存の `M_MmdToon` と `M_MmdToonTranslucent` をそのまま使います。
 
-**これを落とすと透けすぎます。** IA の `orig_髪の毛.png` はアルファの 98.4% が 0.75 以上で、
-lilToon ではほぼ不透明に描かれます。素のアルファブレンドにすると髪全体が一様に薄くなり、
-「前髪ごしに眉が透けすぎる／隠れない」形で移植元と食い違いました（2026-08-15 に修正）。
+### 髪には使い、眉には使わない
 
-適用条件も移植元と同じで、**半透明かつテクスチャを持つ材質だけ**です
-（移植元 434 行 `if (modeInt == 2 && (hasBaseTex || useOrigTexture)) transparentMode = 2;`）。
-テクスチャの無い単色ガラス（IA のレンズ = 拡散色アルファ 0.7）は素のブレンドのままにします。
+**この使い分けが要ります。** 判定は `bOverlay`（UV 領域のアルファ分布）で行います。
 
-**再現しきれない部分**: サブパスの深度書き込みまでは再現できません。lilToon では
-α < 0.5 の裾どうしが重なっても手前の 1 層しかブレンドされませんが、UE では重なった分だけ濃くなります。
-`DitherTemporalAA`（`/Engine/Functions/Engine_MaterialFunctions02/Utility/DitherTemporalAA`）を
-`OpacityMask` に噛ませれば深度を書いたまま確率的に抜けますが、TemporalAA/TSR が前提でノイズが乗り、
-かつこの組はエクスポーター自身が「見た目ほぼ不透明」と分類したものなので採っていません。
-実測（IA）では昇格対象は前髪と後ろ髪の 2 材質だけで、`"mask"` 側は肌・口内・顔でした。
+| | 性質 | 描き方 |
+|---|---|---|
+| 髪（前髪・後ろ髪） | 房が何枚も重なる | **TwoPass**。芯で深度を書かないと足し算で飽和し、グラデーションが潰れる |
+| 貼り付け材質（眉・まつげ・額の影） | 顔に貼り付いた 1 枚。自分同士は重ならない | **素のアルファでブレンド**。下地の顔が不透明で深度を書くので安全 |
+| テクスチャの無い半透明（レンズ） | 単色ガラス | 素のブレンド（移植元も TwoPass にしない） |
+
+★眉に TwoPass を当てると**黒フチが出ます**（実機で確認）。1 パス目は α ≥ 0.5 を
+**生の色のまま不透明に塗る**ので、0.5〜0.7 の薄い墨で描かれた眉はそこで濃さが戻ります。
+**lilToon の TwoPass 自体がこの帯を濃くする近似**であり、MMD は全部を素のアルファで
+混ぜています。目標は lilToon ではなく MMD なので、貼り付け材質は素直に混ぜます。
+
+### 試して捨てた案
+
+1 枚のマテリアルで済ませようとして 3 回失敗しました。同じ道を辿らないよう記録します。
+
+| 案 | 結果 |
+|---|---|
+| Translucent + 不透明度の付け替え（α ≥ 0.5 → 1.0） | 深度を書けないので房が重なると飽和し、グラデーションが潰れる |
+| Translucent + `Output Depth and Velocity` | しきい値（`OpacityMaskClipValue`）が効くのは**速度出力だけで深度書き込みには効かない**。毛先まで深度を書き、奥の髪が消えて背景が透ける |
+| Masked + ディザ（確率的に抜く） | 顔のような近距離の面で市松模様がそのまま見える |
+
+`SubpassWeight` / `SubpassCutoff` は上記 1 案目の名残ですが、2 パス目の濃さ調整に使えるので
+パラメータとしては残してあります（2 パス目は `SubpassWeight = 0` で使う）。
+
+★`TranslucencySortPriority` はコンポーネント単位なので、輪郭線(-1) → 毛先パス(0) の順に
+描かれるよう設定しています。
 
 ★`TranslucencySortPriority` は `UMaterialInterface` ではなく `UPrimitiveComponent` のプロパティで、
 1 コンポーネントに 1 個しかありません。スロット単位の並び替えには使えないため、インポーターからは触りません。

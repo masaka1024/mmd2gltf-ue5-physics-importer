@@ -60,24 +60,24 @@ bool FMmdMaterialPlanTest::RunTest(const FString& Parameters)
 
 	// --- origTexture (無加工テクスチャ) ---
 	{
-		// 真の半透明 (alphaClass=blend) で無加工版がある = IA の眉・透け髪。
-		// alphaMode が MASK でも半透明へ昇格させる。
+		// 真の半透明 (alphaClass=blend) で無加工版がある = IA の透け髪。
+		// ★テクスチャを持ち、貼り付け材質でもないので TwoPass 構成になる:
+		//   本体は 1 パス目 (Masked, α >= 0.5 の芯 + 深度)、2 パス目は別コンポーネント。
 		const FMmdMaterialPlan Promoted = FMmdMaterialConversion::PlanMaterial(
-			MakeInfo(TEXT("MASK"), 0.5f, TEXT("blend"), 3));
-		TestTrue(TEXT("alphaClass=blend + origTexture は半透明へ昇格する"), Promoted.bTranslucent);
-		TestTrue(TEXT("昇格したことが分かる"), Promoted.bPromotedByOrigTexture);
+			MakeInfo(TEXT("MASK"), 0.5f, TEXT("blend"), 3, 2));
+		TestTrue(TEXT("alphaClass=blend + origTexture は昇格扱い"), Promoted.bPromotedByOrigTexture);
+		TestTrue(TEXT("2 パス目が要る"), Promoted.bSoftPass);
+		TestFalse(TEXT("本体は 1 パス目なので Masked"), Promoted.bTranslucent);
+		TestEqual(TEXT("1 パス目のしきい値は 0.5 (lilToon の _SubpassCutoff)"), Promoted.AlphaCutoff, 0.5f);
 		TestTrue(TEXT("無加工テクスチャを使う"), Promoted.bUseOrigTexture);
 
-		// mask 由来の昇格組 (肌・服・メガネ)。見た目はほぼ不透明なので Masked のまま。
-		// 不透明パスで深度を書き、真の半透明より必ず先に描かれる = 移植元の AlphaTest 帯。
-		//
-		// ★無加工版は縁の画素が下地と未合成なので、硬いアルファテストで描くと
-		//   その濃さがフルで出る (IA の眉・目の輪郭に黒フチが出た)。
-		//   Masked で無加工版を使うならディザとセットにする。
+		// mask 由来の組 (肌・服・メガネ)。見た目はほぼ不透明なので Masked のまま。
+		// 不透明パスで深度を書き、半透明より必ず先に描かれる = 移植元の AlphaTest 帯。
 		const FMmdMaterialPlan MaskOrig = FMmdMaterialConversion::PlanMaterial(
 			MakeInfo(TEXT("MASK"), 0.25f, TEXT("mask"), 3));
 		TestFalse(TEXT("alphaClass=mask なら origTexture があっても Masked のまま"), MaskOrig.bTranslucent);
 		TestFalse(TEXT("昇格していない"), MaskOrig.bPromotedByOrigTexture);
+		TestFalse(TEXT("2 パス目も要らない"), MaskOrig.bSoftPass);
 		TestFalse(TEXT("Masked の材質には無加工テクスチャを使わない"), MaskOrig.bUseOrigTexture);
 		TestEqual(TEXT("Masked のままなので alphaCutoff が効く"), MaskOrig.AlphaCutoff, 0.25f);
 
@@ -119,64 +119,78 @@ bool FMmdMaterialPlanTest::RunTest(const FString& Parameters)
 		TestTrue (TEXT("V4X hairshadow (髪の影) は貼り付け"),   IsOverlay(0.65f, 0.22f));
 		TestTrue (TEXT("V4X cheek (チーク) は貼り付け"),        IsOverlay(0.45f, 0.08f));
 
+		// ★眉は TwoPass にしない。1 パス目は α >= 0.5 を生の色のまま不透明に塗るので、
+		//   0.5〜0.7 の薄い墨で描かれた眉はそこで濃さが戻り、黒フチになる (実機で確認)。
+		//   MMD は全部を素のアルファでブレンドするので、貼り付け材質はそちらに倣う。
 		const FMmdMaterialPlan Brow = FMmdMaterialConversion::PlanMaterial(FaceInfo, MakeStats(0.29f, 0.59f));
-		TestTrue(TEXT("貼り付け材質は半透明へ昇格する"), Brow.bTranslucent);
+		TestTrue(TEXT("貼り付け材質は昇格扱い"), Brow.bPromotedByOrigTexture);
+		TestTrue(TEXT("眉は素のアルファでブレンドする"), Brow.bTranslucent);
+		TestFalse(TEXT("眉に TwoPass は使わない (黒フチの原因)"), Brow.bSoftPass);
 		TestTrue(TEXT("昇格したので無加工版を使う"), Brow.bUseOrigTexture);
 
 		const FMmdMaterialPlan Skin = FMmdMaterialConversion::PlanMaterial(FaceInfo, MakeStats(0.00f, 1.00f));
 		TestFalse(TEXT("肌は Masked のまま"), Skin.bTranslucent);
+		TestFalse(TEXT("肌には 2 パス目が要らない"), Skin.bSoftPass);
 		TestFalse(TEXT("肌には無加工版を使わない"), Skin.bUseOrigTexture);
+		TestEqual(TEXT("肌のしきい値は glTF の alphaCutoff のまま"), Skin.AlphaCutoff, 0.1f);
 
 		// 測れなかった場合は昇格させない (誤判定より安全側)。
 		const FMmdMaterialPlan Unmeasured =
 			FMmdMaterialConversion::PlanMaterial(FaceInfo, MakeStats(0.29f, 0.59f, 0));
 		TestFalse(TEXT("標本が足りなければ判定しない"), Unmeasured.bOverlay);
-		TestFalse(TEXT("測れなければ昇格させない"), Unmeasured.bTranslucent);
+		TestFalse(TEXT("測れなければ 2 パス目も使わない"), Unmeasured.bSoftPass);
 
 		// origTexture が無ければ、いくら半透明でも差し替え先が無いので昇格しない。
 		const FMmdMaterialPlan NoOrig = FMmdMaterialConversion::PlanMaterial(
 			MakeInfo(TEXT("MASK"), 0.1f, TEXT("mask"), -1, 2), MakeStats(0.29f, 0.59f));
 		TestFalse(TEXT("origTexture が無ければ貼り付け判定しない"), NoOrig.bOverlay);
 
-		// 半透明側はブレンドできるので無加工版が使える。
+		// 透け髪 (テクスチャあり) は TwoPass。
 		const FMmdMaterialPlan BlendOrig = FMmdMaterialConversion::PlanMaterial(
 			MakeInfo(TEXT("MASK"), 0.1f, TEXT("blend"), 11, 10));
-		TestTrue(TEXT("昇格した材質は半透明"), BlendOrig.bTranslucent);
-		TestTrue(TEXT("半透明側は無加工版を使う"), BlendOrig.bUseOrigTexture);
+		TestTrue(TEXT("透け髪は 2 パス目が要る"), BlendOrig.bSoftPass);
+		TestTrue(TEXT("透け髪は無加工版を使う"), BlendOrig.bUseOrigTexture);
 
 		// 元から BLEND のものは「昇格」ではない (集計を分けるため)。
 		const FMmdMaterialPlan Blend = FMmdMaterialConversion::PlanMaterial(
 			MakeInfo(TEXT("BLEND"), 0.0f, TEXT("blend"), 3));
-		TestTrue(TEXT("BLEND は半透明"), Blend.bTranslucent);
 		TestFalse(TEXT("元から BLEND のものは昇格に数えない"), Blend.bPromotedByOrigTexture);
 		TestTrue(TEXT("BLEND はアルファブレンドするので無加工テクスチャを使う"), Blend.bUseOrigTexture);
 
+		// ★テクスチャを持たない半透明 (レンズのような単色ガラス) は 1 枚で描く。
+		//   移植元も TwoPass にしない。芯と毛先を分ける意味がないため。
 		const FMmdMaterialPlan PlainBlend = FMmdMaterialConversion::PlanMaterial(
 			MakeInfo(TEXT("BLEND"), 0.0f, TEXT("blend"), -1));
-		TestTrue(TEXT("origTexture が無くても BLEND は半透明"), PlainBlend.bTranslucent);
+		TestTrue(TEXT("テクスチャの無い BLEND は素の半透明のまま"), PlainBlend.bTranslucent);
+		TestFalse(TEXT("テクスチャの無い BLEND に 2 パス目は要らない"), PlainBlend.bSoftPass);
 		TestFalse(TEXT("origTexture が無ければ差し替えない"), PlainBlend.bUseOrigTexture);
 	}
 
-	// --- 不透明サブパス (移植元 lilToon の TwoPass 相当) ---
-	// ★これが無いと、α 0.75〜1.0 の帯が広い髪テクスチャが一様に透けて
-	//   「前髪ごしに眉が透けすぎる」形で移植元と食い違う。
+	// --- TwoPass (移植元 lilToon の TransparentMode=TwoPass 相当) ---
+	// ★UE のマテリアルは 1 枚で 2 パスを持てない (Masked と Translucent は排他)。
+	//   本体を 1 パス目 (Masked) にし、2 パス目は UMmdSoftPassComponent が描く。
+	//   これが無いと、髪は「重なると飽和してグラデーションが潰れる」か
+	//   「毛先が硬く切れる」かのどちらかにしかならない。
 	{
-		// 半透明かつテクスチャあり (透け髪) → サブパスで α>=0.5 を不透明に描く
+		// 半透明かつテクスチャあり (透け髪) → TwoPass
 		const FMmdMaterialPlan Hair = FMmdMaterialConversion::PlanMaterial(
 			MakeInfo(TEXT("MASK"), 0.1f, TEXT("blend"), 11, 10));
-		TestTrue(TEXT("透け髪は半透明"), Hair.bTranslucent);
-		TestTrue(TEXT("テクスチャのある半透明は不透明サブパスを使う"), Hair.bSubpassOpaque);
+		TestTrue(TEXT("テクスチャのある半透明は TwoPass"), Hair.bSubpassOpaque);
+		TestTrue(TEXT("2 パス目が要る"), Hair.bSoftPass);
+		TestFalse(TEXT("本体は 1 パス目なので Masked"), Hair.bTranslucent);
 
-		// 半透明でテクスチャ無し (レンズのような単色ガラス) → 素のブレンド
+		// 半透明でテクスチャ無し (レンズのような単色ガラス) → 1 枚で描く
 		const FMmdMaterialPlan Lens = FMmdMaterialConversion::PlanMaterial(
 			MakeInfo(TEXT("BLEND"), 0.0f, TEXT("opaque"), -1, -1));
-		TestTrue(TEXT("レンズは半透明"), Lens.bTranslucent);
-		TestFalse(TEXT("テクスチャの無い半透明はサブパスを使わない"), Lens.bSubpassOpaque);
+		TestTrue(TEXT("レンズは半透明のまま"), Lens.bTranslucent);
+		TestFalse(TEXT("テクスチャの無い半透明は TwoPass にしない"), Lens.bSubpassOpaque);
+		TestFalse(TEXT("2 パス目も要らない"), Lens.bSoftPass);
 
 		// Masked の材質にはそもそも関係しない
 		const FMmdMaterialPlan Skin = FMmdMaterialConversion::PlanMaterial(
 			MakeInfo(TEXT("MASK"), 0.1f, TEXT("mask"), 3, 2));
-		TestFalse(TEXT("Masked の材質はサブパスを使わない"), Skin.bSubpassOpaque);
+		TestFalse(TEXT("Masked の材質は TwoPass にしない"), Skin.bSubpassOpaque);
+		TestFalse(TEXT("2 パス目も要らない"), Skin.bSoftPass);
 	}
 
 	return true;
@@ -318,19 +332,29 @@ bool FMmdMaterialConversionTest::RunTest(const FString& Parameters)
 			if (Info->BaseColorTexture < 0) TexturelessCount++;
 		}
 
-		// --- 不透明サブパス (lilToon TwoPass 相当) の重みが入っているか ---
-		if (bIsTranslucent)
+		// --- TwoPass の 2 パス目が要る材質に印が付いているか ---
+		// 実際に描くのは UMmdSoftPassComponent で、この印を見て判断する。
 		{
-			float ActualWeight = -1.0f;
-			MI->GetScalarParameterValue(FMaterialParameterInfo(TEXT("SubpassWeight")), ActualWeight);
-			const float WantWeight = Plan.bSubpassOpaque ? 1.0f : 0.0f;
-			if (!FMath::IsNearlyEqual(ActualWeight, WantWeight, 1e-4f))
+			float ActualSoftPass = -1.0f;
+			MI->GetScalarParameterValue(FMaterialParameterInfo(TEXT("SoftPass")), ActualSoftPass);
+			const float WantSoftPass = Plan.bSoftPass ? 1.0f : 0.0f;
+			if (!FMath::IsNearlyEqual(ActualSoftPass, WantSoftPass, 1e-4f))
 			{
 				SubpassMismatched++;
 				AddError(FString::Printf(
-					TEXT("スロット '%s': SubpassWeight が %g (期待 %g)"), *SlotName, ActualWeight, WantWeight));
+					TEXT("スロット '%s': SoftPass が %g (期待 %g)"), *SlotName, ActualSoftPass, WantSoftPass));
 			}
-			if (Plan.bSubpassOpaque) SubpassCount++;
+			if (Plan.bSoftPass)
+			{
+				SubpassCount++;
+				// 2 パス目を持つ材質の本体は 1 パス目 = Masked でなければならない。
+				if (bIsTranslucent)
+				{
+					SubpassMismatched++;
+					AddError(FString::Printf(
+						TEXT("スロット '%s': 2 パス目を持つのに本体が Translucent になっている"), *SlotName));
+				}
+			}
 		}
 
 		// --- alphaCutoff がマスクのしきい値パラメータに入っているか (Masked のときだけ) ---
@@ -400,8 +424,9 @@ bool FMmdMaterialConversionTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("マスク閾値が glTF の alphaCutoff と一致する"), CutoffMismatched, 0);
 	TestEqual(TEXT("拡散色 (baseColorFactor) がマテリアルインスタンスに入っている"), ColorMismatched, 0);
 	AddInfo(FString::Printf(TEXT("ベーステクスチャを持たない材質: %d 件 (拡散色だけで色が決まる)"), TexturelessCount));
-	TestEqual(TEXT("不透明サブパス (TwoPass 相当) の重みが正しい"), SubpassMismatched, 0);
-	AddInfo(FString::Printf(TEXT("不透明サブパスを使う半透明材質: %d 件"), SubpassCount));
+	TestEqual(TEXT("TwoPass の印が正しく入っている"), SubpassMismatched, 0);
+	TestEqual(TEXT("戻り値の 2 パス目の件数が実際と一致する"), R.SoftPass, SubpassCount);
+	AddInfo(FString::Printf(TEXT("TwoPass で描く材質 (毛先パスあり): %d 件"), SubpassCount));
 
 	// --- 輪郭線 ---
 	TestEqual(TEXT("輪郭線フラグがマテリアルインスタンスに入っている"), OutlineMismatched, 0);

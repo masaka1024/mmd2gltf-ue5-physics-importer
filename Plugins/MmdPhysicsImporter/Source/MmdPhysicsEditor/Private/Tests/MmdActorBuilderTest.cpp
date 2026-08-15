@@ -16,6 +16,7 @@
 #include "Materials/MaterialInterface.h"
 #include "MmdActorBuilder.h"
 #include "MmdOutlineComponent.h"
+#include "MmdSoftPassComponent.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -49,6 +50,7 @@ bool FMmdActorBuilderTest::RunTest(const FString& Parameters)
 	// --- 本体 ---
 	USkeletalMeshComponent* MeshTemplate = nullptr;
 	UMmdOutlineComponent* OutlineTemplate = nullptr;
+	UMmdSoftPassComponent* SoftPassTemplate = nullptr;
 	for (USCS_Node* Node : SCS->GetAllNodes())
 	{
 		if (Node == nullptr) continue;
@@ -56,6 +58,11 @@ bool FMmdActorBuilderTest::RunTest(const FString& Parameters)
 		{
 			OutlineTemplate = Outline;
 		}
+		else if (auto* SoftPass = Cast<UMmdSoftPassComponent>(Node->ComponentTemplate))
+		{
+			SoftPassTemplate = SoftPass;
+		}
+		// ★追従コンポーネントもスケルタルメッシュなので、先に弾いてから本体を拾う。
 		else if (auto* SkelMesh = Cast<USkeletalMeshComponent>(Node->ComponentTemplate))
 		{
 			MeshTemplate = SkelMesh;
@@ -80,6 +87,23 @@ bool FMmdActorBuilderTest::RunTest(const FString& Parameters)
 		if (UseOutline > 0.5f) WithOutline++;
 	}
 	AddInfo(FString::Printf(TEXT("輪郭線を描く材質: %d 件"), WithOutline));
+
+	// --- TwoPass の 2 パス目 ---
+	int32 WithSoftPass = 0;
+	for (const FSkeletalMaterial& Slot : Mesh->GetMaterials())
+	{
+		if (Slot.MaterialInterface == nullptr) continue;
+		float SoftPass = 0.0f;
+		Slot.MaterialInterface->GetScalarParameterValue(
+			FMaterialParameterInfo(TEXT("SoftPass")), SoftPass);
+		if (SoftPass > 0.5f) WithSoftPass++;
+	}
+	AddInfo(FString::Printf(TEXT("2 パス目が要る材質: %d 件"), WithSoftPass));
+	TestEqual(TEXT("毛先パスの有無が材質の状態と一致する"), R.bHasSoftPass, WithSoftPass > 0);
+	if (WithSoftPass > 0)
+	{
+		TestNotNull(TEXT("毛先パスのコンポーネントが入っている"), SoftPassTemplate);
+	}
 
 	TestEqual(TEXT("輪郭線の有無が材質の状態と一致する"), R.bHasOutline, WithOutline > 0);
 	if (WithOutline > 0)

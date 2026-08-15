@@ -115,6 +115,15 @@ struct MMDPHYSICSEDITOR_API FMmdMaterialPlan
 	bool bSubpassOpaque = false;
 
 	/**
+	 * 2 パス目 (柔らかい毛先) が要るか。
+	 *
+	 * 立っているとき、本体は 1 パス目として Masked で描かれ (α >= 0.5 の芯 + 深度)、
+	 * 2 パス目は UMmdSoftPassComponent が同じメッシュを Translucent で描く。
+	 * UE のマテリアルは 1 枚で 2 パスを持てないため、こう分ける。
+	 */
+	bool bSoftPass = false;
+
+	/**
 	 * Masked のときのアルファのしきい値。
 	 * 負の値 = アルファを見ない (glTF の alphaMode=OPAQUE)。
 	 */
@@ -138,6 +147,8 @@ struct MMDPHYSICSEDITOR_API FMmdMaterialResult
 	int32 ExtractedTextures = 0;
 	/** 輪郭線フラグ (PMX flags bit4) が立っている材質の数。 */
 	int32 WithOutline = 0;
+	/** 2 パス目 (柔らかい毛先) が要る材質の数。 */
+	int32 SoftPass = 0;
 	FString Message;
 };
 

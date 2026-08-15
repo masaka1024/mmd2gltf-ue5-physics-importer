@@ -29,6 +29,8 @@ struct MMDPHYSICSEDITOR_API FMmdActorResult
 	UBlueprint* Blueprint = nullptr;
 	/** 輪郭線コンポーネントを付けたか (輪郭線を描く材質が無ければ付けない)。 */
 	bool bHasOutline = false;
+	/** 2 パス目 (柔らかい毛先) のコンポーネントを付けたか。 */
+	bool bHasSoftPass = false;
 	FString Message;
 };
 

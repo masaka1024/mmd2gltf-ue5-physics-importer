@@ -15,6 +15,7 @@
 #include "Materials/MaterialInterface.h"
 #include "MmdOutlineComponent.h"
 #include "MmdPhysicsCoreLog.h"
+#include "MmdSoftPassComponent.h"
 #include "UObject/SavePackage.h"
 
 #define LOCTEXT_NAMESPACE "MmdActorBuilder"
@@ -34,15 +35,15 @@ namespace
 		return UPackage::SavePackage(Package, nullptr, *FileName, Args);
 	}
 
-	/** 輪郭線を描く材質が 1 つでもあるか (本体マテリアルの UseOutline を見る)。 */
-	bool HasAnyOutline(USkeletalMesh* Mesh)
+	/** 指定のスカラーパラメータが立っている材質が 1 つでもあるか。 */
+	bool AnyMaterialHasFlag(USkeletalMesh* Mesh, const TCHAR* ParameterName)
 	{
 		for (const FSkeletalMaterial& Slot : Mesh->GetMaterials())
 		{
 			if (Slot.MaterialInterface == nullptr) continue;
-			float UseOutline = 0.0f;
+			float Value = 0.0f;
 			if (Slot.MaterialInterface->GetScalarParameterValue(
-				FMaterialParameterInfo(TEXT("UseOutline")), UseOutline) && UseOutline > 0.5f)
+				FMaterialParameterInfo(ParameterName), Value) && Value > 0.5f)
 			{
 				return true;
 			}
@@ -118,10 +119,23 @@ FMmdActorResult FMmdActorBuilder::BuildActor(USkeletalMesh* Mesh)
 	}
 	SCS->AddNode(MeshNode);   // 最初に足したものがルートになる
 
+	// --- 半透明の 2 パス目 (柔らかい毛先) ---
+	// 本体は 1 パス目 (Masked) を描いている。lilToon の TwoPass を成立させるには
+	// もう一度 Translucent で描く必要があるので、そのコンポーネントを足す。
+	Result.bHasSoftPass = AnyMaterialHasFlag(Mesh, TEXT("SoftPass"));
+	if (Result.bHasSoftPass)
+	{
+		USCS_Node* SoftPassNode = SCS->CreateNode(UMmdSoftPassComponent::StaticClass(), TEXT("SoftPass"));
+		if (SoftPassNode != nullptr)
+		{
+			MeshNode->AddChildNode(SoftPassNode);
+		}
+	}
+
 	// --- 輪郭線 ---
 	// 輪郭線を描く材質が 1 つも無いモデルには付けない (何も描かないコンポーネントを
 	// 置いても紛らわしいだけなので)。
-	Result.bHasOutline = HasAnyOutline(Mesh);
+	Result.bHasOutline = AnyMaterialHasFlag(Mesh, TEXT("UseOutline"));
 	if (Result.bHasOutline)
 	{
 		USCS_Node* OutlineNode = SCS->CreateNode(UMmdOutlineComponent::StaticClass(), TEXT("Outline"));
@@ -138,8 +152,10 @@ FMmdActorResult FMmdActorBuilder::BuildActor(USkeletalMesh* Mesh)
 
 	Result.bSuccess = true;
 	Result.Blueprint = Blueprint;
-	Result.Message = FString::Printf(TEXT("アクターを生成しました: %s%s"),
-		*FullPath, Result.bHasOutline ? TEXT(" (輪郭線あり)") : TEXT(" (輪郭線なし)"));
+	Result.Message = FString::Printf(TEXT("アクターを生成しました: %s (輪郭線 %s / 毛先パス %s)"),
+		*FullPath,
+		Result.bHasOutline ? TEXT("あり") : TEXT("なし"),
+		Result.bHasSoftPass ? TEXT("あり") : TEXT("なし"));
 	UE_LOG(LogMmdPhysics, Log, TEXT("[MmdPhysics] %s"), *Result.Message);
 	return Result;
 }
