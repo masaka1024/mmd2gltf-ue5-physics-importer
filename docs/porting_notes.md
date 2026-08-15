@@ -109,9 +109,9 @@ git clone --depth 1 https://github.com/masaka1024/mmd2gltf-unity-physics-importe
 
 | 移植元 | UE 版 |
 |---|---|
-| `alphaMode` OPAQUE/MASK → RenderingMode 0/1 | `M_MmdToon`（`BLEND_Masked`）。OPAQUE はインスタンスで `OpacityMaskClipValue=0` |
+| `alphaMode` OPAQUE/MASK → RenderingMode 0/1 | `M_MmdToon`（`BLEND_Masked`）。OPAQUE はインスタンスの `AlphaCutoff` を負の値にして「アルファを見ない」を表す |
 | `alphaMode` BLEND → RenderingMode 2 | `M_MmdToonTranslucent`（`BLEND_Translucent`）。アルファは `MP_Opacity` へ |
-| `_Cutoff = alphaCutoff > 0 ? alphaCutoff : 0.5` | 同じ。MASK の材質だけ `OpacityMaskClipValue` に入れる（`MmdMaterialInfo::EffectiveAlphaCutoff`） |
+| `_Cutoff = alphaCutoff > 0 ? alphaCutoff : 0.5` | 同じ。MASK の材質だけインスタンスの `AlphaCutoff` パラメータに入れる（`MmdMaterialInfo::EffectiveAlphaCutoff`。下の「マスターのパラメータ」も参照） |
 | `_Color = baseColorFactor` | 同じ。マスターの `BaseColor` パラメータ。色とアルファの両方に掛ける |
 | `origTexture` によるプリベイク前テクスチャの差し替え | **半透明として描く材質だけ**差し替える（下記） |
 | `origTexture` による MASK→Transparent 昇格 | **`alphaClass=="blend"` のものだけ**昇格させる（下記） |
@@ -281,7 +281,7 @@ clip(alphaRef - _SubpassCutoff);   // _SubpassCutoff の既定は 0.5
 | `SubpassCutoff` | Translucent | TwoPass 相当のしきい値（既定 0.5 = lilToon の `_SubpassCutoff`） |
 | `SubpassWeight` | Translucent | 0 = 素のブレンド / 1 = α ≥ Cutoff を不透明として描く |
 | `ToonTex` / `UseToon` / `SphereTex` / `SphereMulWeight` / `SphereAddWeight` | 両方 | トゥーンとスフィア |
-| `EdgeColor` / `EdgeSize` | 両方 | 輪郭線用。**まだ描画には使っていない**（値の保存だけ） |
+| `EdgeColor` / `EdgeSize` | 両方 | 輪郭線用。本体マテリアルは描画に使わず、`MmdOutlineComponent` がここから読んで輪郭線マテリアルへ渡す |
 
 ★マスク閾値は `BasePropertyOverrides.OpacityMaskClipValue` ではなく**マテリアルのパラメータ**
 （`AlphaCutoff`）で持っています。BasePropertyOverrides は値ごとに静的 permutation が増えるためです。
@@ -330,6 +330,159 @@ MMD 自身も同じ枚数を描いています。
 ★輪郭線マテリアルは**動的インスタンス**です（コンポーネントが登録時に作る）。
 そのため詳細パネルで太さを触っても自動では反映されず、`PostEditChangeProperty` で
 作り直しています。太さは MMD と見比べて決める値なので、その場で効くことが要件です。
+
+## モーション（VMD）はエクスポーターが焼き込む — プラグインに VMD リーダーは無い
+
+`mmd2gltf-gui` は VMD を **glTF 標準のアニメーション**としてベイクします
+（`mmd2gltf/animation.py`：ベジェ補間の評価 → MMD と同じ変形順（変形階層 → 付与 → CCD-IK + 軸制限）
+→ 30fps で記録）。つまりモーションは `extras.mmd` ではなく **glTF の本体側**に載っており、
+UE 標準の Interchange が `AnimSequence` として取り込みます。
+
+したがってインポーター側に VMD の読み取りも IK ソルバも要りません。実際 IA の `.glb` には
+`rotation` 53ch + `translation` 1ch（各 7001 キー = 30fps 丁度）が入っており、UE では
+`IA_Anim`（ボーン 54 トラック / 7000 フレーム）として正しく取り込まれています。
+
+`extras.mmd` 側にはボーンの `flags` / `layer` / `inherit_parent` / `fixed_axis` / `ik{...}` が
+残っていますが、これは**実行時 IK を組み直したいエンジン向けの保存**であって、
+ベイク済みモーションを再生するだけなら使いません。
+
+### 【3】がアニメーションを割り当てる
+
+取り込まれた `AnimSequence` は、コンポーネントに割り当てないと再生されません。以前は
+「ここでアニメーションの設定は触らない」としていたため、`BP_<メッシュ名>` を置いても
+参照ポーズのまま立っているだけでした。現在は `FMmdActorBuilder::FindAnimationFor` が
+**メッシュのスケルトンで再生できる `AnimSequence`** を探して割り当てます。
+
+- 探索はアセットレジストリの **タグ**（`UAnimationAsset::Skeleton` は `AssetRegistrySearchable`）
+  で絞り、候補以外は読み込みません。全部 `GetAsset()` するとプロジェクト内の全モーションを
+  展開することになるためです（実測: IA のモーション 1 本で圧縮データ 72MB）
+- 優先順は「同じフォルダ (+2) > 名前がメッシュ名で始まる (+1)」。Interchange は
+  `<メッシュ名>_Anim` をメッシュの隣に置くので通常は一意に決まります。同点は名前順
+  （レジストリの列挙順に依存させないため）
+- 再生モードは `AnimationSingleNode`（ループ）。**Post-Process AnimBP は再生モードに関わらず
+  後段で必ず走る**ので物理と共存し、ボーン追従の剛体には書き戻さないため体はモーションどおりに動きます
+- `SetAnimationMode` は `bForceInitAnimScriptInstance=false` で呼びます。触っているのは
+  ワールドに登録されていない**コンポーネントテンプレート**で、アニメーションインスタンスを
+  作らせる場面ではないためです
+
+### モーフ（表情）のアニメーションは UE が取りこぼす
+
+`.glb` には `weights` チャンネルが 1 本入っています（IA で 1699 キー × 45 トラック、0〜221.3 秒）。
+UE がモーフ名を読む場所（`mesh.extras.targetNames`）にも 45 件が入っており、データは仕様どおりです。
+それでも取り込み後の `AnimSequence` はカーブ 0 本になります。
+
+原因は `Engine/Plugins/Interchange/Runtime/Source/Import/Private/Gltf/InterchangeGltfAnimation.cpp`：
+
+1. `weights` チャンネルは `MorphTargetAnimations.FindOrAdd(AnimatedNodeIndex)` で
+   **メッシュノード番号**をキーに積まれる
+2. それを `ProcessRiggedAnimations()` にそのまま渡す（= メッシュノードをスケルトンルート扱い）
+3. `AcquireTrackNode(メッシュノードUid)` → `SetCustomSkeletonNodeUid(メッシュノードUid)`
+
+ボーン側は **root joint の Uid** でトラックノードを作るのでキーが一致せず、別々のトラックノードに
+なります。モーフ側は「スケルトン」としてメッシュノードを指しているため後段で解決できず消えます。
+素の設定で取り込み直しても再現しました（生成物は `AnimSequence` 1 本・ボーン 54 トラック・カーブ 0 本）。
+
+`weights` チャンネルの target は glTF 仕様上メッシュを持つノードしか指定できないので、
+**エクスポーター側で回避する余地はありません**。そこでプラグイン側で埋めます。
+
+### 埋め方（`FMmdMorphAnimation::ApplyMorphCurves`）
+
+【3】アクター生成が、割り当てた `AnimSequence` に対して実行します（`.glb` を渡したときだけ）。
+
+1. `GlbPhysicsReader::ParseGlb` で JSON チャンクと BIN チャンクに分ける（物理と同じ経路）
+2. `weights` チャンネルを 1 本探し、`target.node → nodes[n].mesh` からメッシュ番号を得る
+3. `meshes[i].extras.targetNames` でモーフ名を得る（**UE がモーフ名を読むのと同じ場所**）
+4. サンプラの `input`（時刻）/ `output`（ウェイト）を `ReadFloatAccessor` で読む
+5. トラックごとに `UAnimationBlueprintLibrary::AddCurve` + `AddFloatCurveKeys`
+6. `Skeleton->AccumulateCurveMetaData(name, false, true)` で「モーフを動かすカーブ」と登録する
+   （FBX インポータの `SkeletalMeshEdit.cpp` と Interchange の `InterchangeAnimSequenceFactory.cpp`
+   が同じことをしている。これが無いとカーブはあるのにモーフが動かないことがある）
+
+注意している点:
+
+- 出力の並びは **フレームごとに全トラック**（t0 の track0..N-1 → t1 の track0..N-1 …）。
+  `CUBICSPLINE` のときは 1 キーにつき `in / value / out` が並ぶので真ん中だけ取る
+  （接線は捨てる。Interchange のモーフ経路も捨てている）
+- **メッシュに同名のモーフターゲットが無いトラックは飛ばす。** UV モーフはここに落ちる
+- **既にカーブがあるものは触らない。** UE 側が直った将来に二重で入れないため。
+  作り直しても増えないことは自動テストで見ている
+- `componentType` が FLOAT (5126) でなければ何もしない（glTF 的には正規化整数もあり得るが、
+  エクスポーターは float で出す）。`ReadFloatAccessor` は `byteStride` を見ない = 詰まっている前提
+
+★これは **UE の不具合を埋めるための処理**であって仕様の実装ではないので、1 ファイルに閉じてあります。
+UE 側が直ったら `MmdMorphAnimation.*` を消して【3】の呼び出しを外すだけで済みます。
+
+なお UV モーフ（PMX のモーフ種別 3。IA では 8 件）は、UE のモーフターゲットが頂点位置・法線・接線の
+デルタしか持てないため、そもそも取り込まれません（45 件中 37 件だけが `MorphTarget` になります）。
+カーブを足す側でも同じ 8 件が「モーフターゲット無し」で除外されます。
+
+## 共有トゥーンが無いときは近似ランプを生成する
+
+MMD の共有トゥーン（`toon01`〜`toon10`）は **MMD 本体に付属する画像**で、PMX にはその名前しか
+入っていません。モデルにも `.glb` にも実体が無いので、上の抽出経路でも取り出せません。
+移植元 Unity 版はここで諦めて「陰なし」に倒していました（`FindSharedToonTexture` が
+`null` を返したら警告して終わり）。UE 版は代わりに `FMmdToonRamp`（`MmdToonRamp.h`）が
+**自作の近似ランプ**を `UTexture2D` として生成し、それを当てます。
+
+解決は 3 段構えで、**1 段目はこれまでと完全に同じ**です:
+
+1. 名前 `toonXX` でプロジェクト全体を検索（最優先）
+2. 生成済みの `T_MmdToonApproxXX`
+3. 無ければ生成する（`{モデルのフォルダ}/SharedToon/` 配下）
+
+つまり本家の画像を取り込んでいるプロジェクトの結果は 1 ビットも変わらず、
+取り込んでいないプロジェクトだけが「陰なし」から「近似の陰付き」へ変わります。
+3 に落ちたときのログは**警告ではなく情報**です。共有トゥーンが無いのは異常ではなく既定の状態で、
+それでも変換はワンボタンで完走するようになったためです。
+
+### なぜ同梱ではなく生成か
+
+本家 `toon01`〜`10.bmp` をリポジトリへ同梱するのは再配布に当たります。
+かといってプラグインが `/Game` の外（プラグインのコンテンツフォルダ）に固定のアセットを持つと、
+今度はユーザーが色を詰められません。生成にすると:
+
+- リポジトリにバイナリのアセットが増えない（マスターマテリアルを `.uasset` で置かず
+  ノードグラフから組み立てているのと同じ判断）
+- モデルのフォルダ配下に出るので、モデルごと持ち出せる
+- ユーザーが生成後のアセットを直接いじって詰められる。**同名アセットがあれば再生成しない**ので、
+  変換を何度走らせても上書きされない
+
+### なぜ本家の値のコピーを避けたか
+
+「本家 BMP を読んでピクセル値を定数として埋め込む」のがいちばん見た目は近くなりますが、
+それは画像の再配布と実質同じです。そこでテーブルの色は**すべて自作の近似値**にしてあります
+（「番号が上がるほど陰が濃い」「肌向けは暖色、衣装向けは紫灰/青灰/茶系」という一般的な傾向に
+沿って手で置いたもの）。本家の見た目が要る人は `toonXX` を取り込めば 1 段目で拾われます。
+
+コード中のコメントにもこの旨を明記してあります（後から「本家の値を貼れば早い」と
+思った人が同じ穴に落ちないため）。
+
+### 4 パラメータのテーブル
+
+ランプ 1 本を `明部色 / 陰部色 / 境界位置 / ぼかし幅` の 4 つで表しています。V 座標は
+マテリアル側の引き方（`ToonUV = (0.5, 1 - saturate(N・L))`）に合わせて **V=0 が明部、V=1 が陰部**。
+
+同じテーブルが 2 箇所にあります。**片方だけ直さないこと**:
+
+| 場所 | 役割 |
+|---|---|
+| `MmdToonRamp.cpp` の `KRampTable` | 実際に生成に使う（正本の複製） |
+| `Tools/make_toon_ramps.py` の `RAMPS` | PNG を吐いて本家 BMP と目視で見比べる |
+
+運用は「Python で PNG を出す → 手元の本家 BMP と並べて見比べる → Python 側を直す →
+同じ値を C++ へ転記する」。二重管理を承知で分けているのは、色を詰める作業に UE の起動を
+挟みたくないからです（1 回の見比べに数分かかると、そもそも詰めなくなる）。
+
+補間は smoothstep ですが、`t = (V - 境界) / ぼかし幅 + 0.5` という形で書いています。
+数学的には `(V - (境界 - 幅/2)) / 幅` と同じですが、こちらは `V == 境界` でちょうど `0.5` に
+なることが浮動小数点でも保証されます。前者だと 1ulp ずれることがあり、明部色と陰部色の和が
+奇数のとき中間色が 1 だけ振れて、境界位置のテストが不安定になりました。
+
+### テクスチャ設定の理由
+
+32x32 / sRGB=on / Clamp / ミップ無し / Bilinear / **無圧縮**（`TC_EditorIcon`）です。
+BC で圧縮すると 4x4 ブロック単位で色が混ざってぼかし幅が指定どおりにならず、
+ミップを作ると縮小版で明部と陰部が平均化されて陰そのものが消えます。
 
 ## GLB バイナリからのテクスチャ抽出
 
@@ -452,6 +605,8 @@ $env:MMD_PARITY_GLB    = "<...>\IA.glb"
 $env:MMD_PARITY_CSV    = "Tools\CsReference\out\ia_300_cs.csv"
 $env:MMD_PARITY_FRAMES = "300"
 $env:MMD_CONV_SKELMESH = "/Game/IA/IA"
+# 近似トゥーンのアセット生成まで見るとき (指定したフォルダへ .uasset を書きます)
+$env:MMD_TOON_RAMP_PACKAGE = "/Game/MmdToonRampTest"
 
 & "<UE>\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" <project>.uproject `
   -ExecCmds="Automation RunTests MmdPhysics" `
@@ -468,11 +623,13 @@ $env:MMD_CONV_SKELMESH = "/Game/IA/IA"
 | `MmdPhysics.Core.MaterialReader` | 各マテリアルの `extras.mmd` を読めているか |
 | `MmdPhysics.Core.GlbImageExtract` | 手で組んだ GLB で `alphaCutoff` / `origTexture` の読み取りと画像の切り出し（`bufferView.byteOffset` の適用、範囲外の拒否）。**データ不要** |
 | `MmdPhysics.Editor.MaterialPlan` | `alphaMode` / `alphaClass` / `origTexture` / `alphaCutoff` から親マスターとマスク閾値が決まる分岐。**データ不要** |
+| `MmdPhysics.Editor.ToonRamp` | 近似トゥーンのテーブル（明部色 / 陰部色 / 境界位置 / ぼかし幅）が生成画素に出ているか。最上段＝明部色・最下段＝陰部色、境界でちょうど中間色、ぼかし幅の外は平坦。**データ不要** |
+| `MmdPhysics.Editor.ToonRampAsset` | 近似トゥーンを実際に `UTexture2D` アセットにする経路（テクスチャ設定と、2 回目に作り直さないこと）。`MMD_TOON_RAMP_PACKAGE` が未設定ならスキップ |
 | `MmdPhysics.Bridge.UeSpace` | 位置と回転が同一の純回転か（行列式 +1） |
 | `MmdPhysics.Bridge.ImportConvention` | 実際に取り込んだスケルトンと座標系が合うか |
 | `MmdPhysics.Editor.WirePhysics` | 配線 → 評価 → 書き戻しが端から端まで通るか |
 | `MmdPhysics.Editor.ConvertMaterials` | 全スロットに MI が付くか、半透明にすべき材質だけが Translucent 親か、マスク閾値が `alphaCutoff` と一致するか、`origTexture` が無加工版へ差し替わっているか、輪郭線フラグが入っているか |
-| `MmdPhysics.Editor.BuildActor` | 生成した Blueprint に本体と輪郭線コンポーネントが入っているか、作り直しても増殖しないか |
+| `MmdPhysics.Editor.BuildActor` | 生成した Blueprint に本体と輪郭線コンポーネントが入っているか、モーションが割り当たっているか（単発再生・ループ）、表情モーフのカーブが足されているか（名前がモーフターゲットと一致し、値が 0 のままでなく、作り直しても二重にならないこと）、作り直しても増殖しないか |
 
 ### 自動化していない部分
 
@@ -483,3 +640,6 @@ $env:MMD_CONV_SKELMESH = "/Game/IA/IA"
   効いていれば出力ログに `半透明 N〈うち origTexture 昇格 M〉/ 無加工テクスチャ K` が出ます。
   IA では「半透明 4〈うち origTexture 昇格 2〉/ 無加工テクスチャ 7」になります
 - 透け髪の房どうしの重なり（TwoPass 相当が無いぶん、移植元と差が出うる唯一の箇所）
+- **モーションを流したときの見え方。** 自動テストが見ているのは「`AnimSequence` が
+  割り当たっているか」までで、実際に踊らせたときに髪・スカートの物理が破綻しないか、
+  センター移動で慣性の持ち越しが無いことがどれだけ目立つかは実機でしか分かりません

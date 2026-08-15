@@ -55,11 +55,50 @@ See [INSTALL.md](INSTALL.md).
    glTFRuntime, the deprecated legacy GLTFImporter, or an FBX detour will not match the coordinate system.
 2. Open **Tools → MMD Physics インポーター**
 3. Pick the skeletal mesh and the `.glb`, then press **"1. Wire / Re-wire Physics"**
-4. Then press **"2. Convert materials to MMD toon"**
-5. Play
+4. Then press **"2. Convert Materials to MMD Toon"**
+5. Then press **"3. Build Actor (body + animation + outline)"**
+6. Drop the resulting `BP_<MeshName>` into the level and play
 
 Step 1 creates and assigns a Post-Process Anim Blueprint named `ABP_<MeshName>_MmdPhysics`
 next to the skeletal mesh.
+
+Step 3 creates a Blueprint actor named `BP_<MeshName>`. Just placing it in the level gets you
+physics, materials, outlines, the hair's second pass and the motion all working. **Run it after
+step 2**, since it decides what is needed by looking at the converted materials.
+
+```
+BP_<MeshName>
+└─ Mesh (skeletal mesh) … physics comes from the Post-Process AnimBP; the motion is assigned here too
+   ├─ SoftPass  … the hair's second pass (soft tips). Added only if some material needs it
+   └─ Outline   … outlines. Added only if some material draws one
+```
+
+### How motion (VMD) is handled
+
+`mmd2gltf-gui` bakes the VMD into a **standard glTF animation** (Bezier interpolation evaluated,
+MMD's own deform order, IK already solved, 30 fps). UE's standard Interchange therefore imports it
+as an `AnimSequence` named `<MeshName>_Anim`, and this plugin contains no VMD reader at all.
+
+Step 3 looks for an `AnimSequence` that plays on the mesh's skeleton and assigns it to the Mesh
+component (looping). To use a different motion, change `Anim to Play` on the Mesh component. When
+several candidates share the skeleton, one is picked — preferring the same folder and a name that
+starts with the mesh name — and the choice is written to the output log.
+
+It coexists with the physics: the Post-Process Anim Blueprint runs afterwards regardless of the
+playback mode, and bone-follow bodies are never written back, so the body follows the motion while
+only hair and skirt get physics.
+
+**Facial morphs are wired up by step 3 too** — but that part is a workaround for UE. UE 5.5's
+Interchange drops glTF morph (`weights`) animation, so the `AnimSequence` ends up bone-only even
+though the `.glb` carries the keys. Step 3 therefore reads those keys straight out of the `.glb` and
+adds the curves whose names match the mesh's morph targets. It uses the `.glb` you picked in the
+importer window, so **select both the mesh and the `.glb`** before running it. Curves that already
+exist are left alone, so rebuilding never duplicates them.
+
+Outline thickness is the component's `Outline Width Scale` (default 0.15); changing it takes effect
+immediately. Materials whose PMX `flags` bit4 is not set get no outline, same as MMD. To add one to
+an existing actor by hand, pick `Mmd Outline Component` from "+ Add" in the details panel — the mesh,
+the follow behaviour and the per-material outline colors are all set up on the spot.
 
 On startup the plugin cross-checks `extras.mmd` bone positions against the skeleton's reference pose
 and logs an actionable error if the import convention does not match.
@@ -70,8 +109,17 @@ and logs an actionable error if the import convention does not match.
 |---|---|
 | Hair/skirt motion looks coarse or judders | On the MMD Physics node, **`FixedTimeStep` should be `1/60` (0.01667)** and **`SubSteps` 2**. At `1/30` the number of internal steps per frame alternates 0,1,0,1,1,... so the real-time update interval is uneven. To step finer, raise `SubSteps`, not `FixedTimeStep` (see [docs/porting_notes.md](docs/porting_notes.md)) |
 | Motion is ~3x faster than MMD | `Gravity` must be 98 (PMX units). It is unrelated to UE world gravity |
-| A semi-transparent material has hard, jagged edges | Its material instance should have `M_MmdToonTranslucent` as its parent. If not, the `.glb` material's `alphaMode` is probably not `BLEND` |
+| A semi-transparent material has hard, jagged edges | Check that its material instance's parent is `M_MmdToonTranslucent`. If it is not, the `.glb` material's `alphaMode` is not `BLEND` and `extras.mmd`'s `alphaClass` is not `"blend"` either. Materials whose `alphaClass` is `"mask"` are deliberately left on `M_MmdToon` (see "Known limitations" below) |
+| Eyebrows/eyelashes do not show through the hair | Does that material have an `origTexture` (the un-prebaked texture)? If `無加工テクスチャ N` in the output log is 0, the `.glb` is an older export without `origTexture` — update the exporter (mmd2gltf-gui) and export again |
+| A translucent edge is hard, or gets clipped at the threshold | Materials on the `M_MmdToon` (Masked) side are cut with the `.glb`'s `alphaCutoff`. Lowering `AlphaCutoff` on the material instance keeps more of the edge (the threshold lives in that parameter, not in the material's `OpacityMaskClipValue`, to avoid a static permutation per value) |
+| Hair is too see-through / not see-through enough | `AlphaCutoff` (default 0.5) on the body hair material is the range drawn as an opaque core. The lower you set it, the more opaque it gets (same default as the source lilToon's `_SubpassCutoff`) |
+| Overlapping hair strands saturate | Check that the `SoftPass` component is present — without it the second pass is never drawn |
 | Translucent materials are drawn in the wrong order | Order follows the material slot order. Fix the material order in the model, or set `TranslucencySortPriority` on the skeletal mesh component in the level (that only orders the whole model against other actors) |
+| The motion does not play | Are you placing the `BP_<MeshName>` from step 3? A bare skeletal mesh gets no animation assigned. If the output log says `アニメーション なし`, either the `.glb` has no motion baked in (converted without the exporter's `--vmd`), or no `AnimSequence` is bound to that skeleton |
+| The face (expressions) does not move | Did you run step 3 **with the `.glb` also selected**? Morph curves are read straight from the `.glb`, because UE's import drops them. If the output log says `表情モーフ 0 本`, either the motion has no morph keys or the morph names do not match the mesh's morph targets |
+| No outlines appear | Are you placing the `BP_<MeshName>` from step 3? A bare skeletal mesh has no outline component. If it is there and still nothing shows, raise `Outline Width Scale`. Materials whose PMX `flags` bit4 is not set correctly get none |
+| All outlines are the same color | Check that `EdgeColor` is set on the body material instances — the component reads the color from there |
+| Outlines lag behind when the expression changes | Check that `MmdOutlineComponent` is updating every frame (`Draw Outline` enabled, component Tick not disabled) |
 | Materials render grey | Look for `[MmdPhysics] マテリアルのコンパイルエラー` in the output log |
 | The log reports the physics went NaN | Raise `SubSteps`. Happens on models with very stiff springs or very light bodies |
 
@@ -100,33 +148,57 @@ Derivation and measured validation: [docs/coordinate_transform.md](docs/coordina
 
 | | Status |
 |---|---|
-| UE 5.5 | Development and verification target. 10 automated tests green |
+| UE 5.5 | Development and verification target. 15 automated tests green |
 | UE 5.6 | Source-level compatibility only. **Not verified on a real install** |
 
 ## Known limitations
 
 - **The model is assumed to be at the world origin.** Simulation runs in component space, so there is
   no momentum carry-over when the character moves. This limitation is inherited from the Unity version.
-- **Outlines (edges) are not supported yet.** `edgeColor` / `edgeSize` are stored on the material
-  instances, so they can be used by a later implementation.
+- **Outlines (edges) are drawn by one dedicated component, which is not added automatically.**
+  Use step 3 ("Build Actor"), or add `MmdOutlineComponent` to the actor you placed in the level
+  (see "Usage" above). Thickness is tunable in place via the component's `Outline Width Scale`.
 - **Materials are Unlit.** This matches MMD, which exports with `KHR_materials_unlit`; shading comes
   from a light direction parameter (`LightDir` on `M_MmdToon` / `M_MmdToonTranslucent`) plus the toon
   ramp. The trade-off is that they do not respond to UE scene lights or Lumen.
-- **Shared toons (`toon01`..`toon10`) are not bundled** — they are not part of the model either.
-  Import them into the project yourself; they are located by name from anywhere in `/Game`.
+- **Shared toons (`toon01`..`toon10`) are not bundled, but nothing breaks without them.**
+  When they are missing the plugin **generates approximate toon ramps** in
+  `{model folder}/SharedToon/T_MmdToonApprox01`..`10` and uses those, so one button press still
+  gets you a shaded toon look. Those colors are our own approximation, not the originals.
+  **Only if you want the exact original colors** do you need to import `toon01`..`toon10`
+  yourself — put them anywhere, they are located by name from anywhere in `/Game` and take
+  priority over the generated ramps. See [`Tools/make_toon_ramps.py`](Tools/make_toon_ramps.py)
+  for how the approximate colors are tuned.
 - **Ordering between translucent materials follows the material (slot) order.** UE's translucent sort
   key is `Priority → Distance → section order`, and sections of one skeletal mesh tie on the first two,
   so MMD's material order is reproduced as-is. However **`TranslucencySortPriority` is a
   `UPrimitiveComponent` property and cannot be set per slot**, so the Unity version's per-material
   `renderQueue = 3000 + slotIdx` nudging has no equivalent here.
-- **Sorting *within* a translucent material (the Unity version's lilToon TwoPass) is not reproduced**,
-  because UE translucent materials have no depth-write prepass. This only bites when a single
-  `alphaMode=BLEND` material overlaps itself (e.g. see-through hair authored as BLEND). MMD hair, skin
-  and clothing are normally `MASK`, so they render in the opaque pass and are unaffected.
-- **`origTexture` in `extras.mmd` (the un-prebaked texture) is not supported.** The Unity version
-  promotes such materials from `MASK` to translucent and uses the un-prebaked image to reproduce MMD's
-  soft eyebrows and see-through hair. This port does not extract textures from the GLB binary, so it
-  uses `alphaMode` as-is.
+- **Self-overlap inside a translucent material is solved with two components, and only for hair.**
+  A UE material cannot hold two passes in one asset, so the work is split between the body
+  (Masked — the core, which also writes depth) and `MmdSoftPassComponent`
+  (Translucent — the soft tips). Something like eyebrows, a single sheet stuck onto the face, never
+  overlaps itself, so it is blended with plain alpha instead — the same as MMD.
+- **The look is tunable through material instance parameters.** `SubpassCutoff` (the threshold of the
+  translucent opaque subpass) and `AlphaCutoff` (the mask threshold) are exposed, so you can dial them
+  in from the editor without re-importing ([docs/porting_notes.md](docs/porting_notes.md)).
+- **Opaque materials such as skin are not promoted to translucent, even when they have an
+  `origTexture`.** The Unity version promoted every material carrying an `origTexture` and let
+  lilToon's TwoPass write the depth. UE translucency cannot write depth, so making skin translucent
+  lets later translucent materials (back hair, for instance) punch through the face. Instead the
+  plugin **measures the alpha distribution over the UV region each material actually uses** and
+  promotes only the semi-transparent decals stuck onto skin — eyebrows, eyelashes, forehead shadow —
+  which is safe because the opaque skin underneath writes the depth. The measured values behind that
+  classifier are in [docs/porting_notes.md](docs/porting_notes.md).
+- **Morph (facial expression) animation is re-read from the `.glb` by the plugin.** UE 5.5's
+  Interchange builds the track for a glTF `weights` channel **using the mesh node as its skeleton**
+  (`ProcessMorphTargetAnimations` in `InterchangeGltfAnimation.cpp`), so it never merges with the
+  bone track and is discarded — re-importing with stock settings reproduces it, giving an
+  `AnimSequence` with 54 bone tracks and 0 curves. Step 3 therefore reads those keys out of the
+  `.glb` itself and adds the curves, which is why **step 3 needs the `.glb`**. If UE ever fixes
+  this, existing curves are left untouched, so the workaround simply becomes a no-op.
+  Separately, UV morphs (PMX morph type 3; 8 of them on IA) have no equivalent in UE morph targets,
+  so they are neither imported nor given a curve.
 - `sphereMode: 3` (sub-texture), `ambient` and `specular` are not supported
   (the Unity version does not support ambient/specular either).
 - **Hitbox generation (the Unity version's step 3) is out of scope.**
