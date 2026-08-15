@@ -45,15 +45,19 @@ namespace MmdPhysics
 		// マテリアル読み取り (GlbMaterialReader) からも使うので公開している。
 		static bool ParseGlb(const TArray<uint8>& d, TSharedPtr<MmdJsonValue>& OutRoot, TArray<uint8>& OutBin, TArray<FString>& OutWarnings);
 
+		// accessor(FLOAT)を BIN から読み出す (bufferView.byteOffset + accessor.byteOffset)。
+		// モーフアニメーションの読み取り (MmdMorphAnimation) からも使うので公開している。
+		// ※componentType は見ない (呼び出し側で FLOAT=5126 を確かめること)。
+		//   bufferView.byteStride も見ない = 詰めて並んでいる前提。
+		//   物理・アニメーションのアクセサはどちらも詰めて出力される。
+		static TArray<float> ReadFloatAccessor(const TSharedPtr<MmdJsonValue>& Root, const TArray<uint8>& Bin, int32 AccIdx);
+
 	private:
 
 		// ---- extras.mmd → PmxPhysicsModel (防御的: 欠損/範囲外でも読み進める) ----
 		static TSharedPtr<PmxPhysicsModel> BuildModel(const TSharedPtr<MmdJsonValue>& Root, float& OutUnitScale, TArray<FString>& OutWarnings);
 
 		static Vec3 Vec3FromArr(const TSharedPtr<MmdJsonValue>& o);
-
-		// accessor(FLOAT)を BIN から読み出す (bufferView.byteOffset + accessor.byteOffset)。
-		static TArray<float> ReadFloatAccessor(const TSharedPtr<MmdJsonValue>& Root, const TArray<uint8>& Bin, int32 AccIdx);
 
 		// 移植元のローカル再帰関数 World(i) に対応。
 		// ※移植元同様サイクル検出は持たない (glTF の node 階層は木である前提)。

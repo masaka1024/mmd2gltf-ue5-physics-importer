@@ -2,6 +2,8 @@
 
 #include "MmdActorBuilder.h"
 
+#include "Animation/AnimSequence.h"
+#include "Animation/Skeleton.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -13,6 +15,7 @@
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Materials/MaterialInterface.h"
+#include "MmdMorphAnimation.h"
 #include "MmdOutlineComponent.h"
 #include "MmdPhysicsCoreLog.h"
 #include "MmdSoftPassComponent.h"
@@ -52,7 +55,57 @@ namespace
 	}
 }
 
-FMmdActorResult FMmdActorBuilder::BuildActor(USkeletalMesh* Mesh)
+UAnimSequence* FMmdActorBuilder::FindAnimationFor(USkeletalMesh* Mesh, int32& OutCandidates)
+{
+	OutCandidates = 0;
+	if (Mesh == nullptr) return nullptr;
+
+	USkeleton* Skeleton = Mesh->GetSkeleton();
+	if (Skeleton == nullptr) return nullptr;
+
+	IAssetRegistry& AR = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry").Get();
+	FARFilter Filter;
+	Filter.ClassPaths.Add(UAnimSequence::StaticClass()->GetClassPathName());
+	Filter.bRecursiveClasses = true;
+	TArray<FAssetData> Assets;
+	AR.GetAssets(Filter, Assets);
+
+	// ★スケルトンの判定はアセットレジストリのタグで行い、アセットは読み込まない。
+	//   UAnimationAsset::Skeleton は AssetRegistrySearchable なので、値は
+	//   "/Script/Engine.Skeleton'/Game/IA/IA_Skeleton.IA_Skeleton'" の形で入っている。
+	//   ここで全部 GetAsset() すると、プロジェクト内の全モーションを展開することになる
+	//   (実測: IA のモーション 1 本で圧縮データ 72MB)。
+	const FString SkeletonTag = FAssetData(Skeleton).GetExportTextName();
+	const FString MeshFolder = FPackageName::GetLongPackagePath(Mesh->GetOutermost()->GetName());
+	const FString MeshName = Mesh->GetName();
+
+	FAssetData Best;
+	int32 BestScore = -1;
+	for (const FAssetData& A : Assets)
+	{
+		FString Value;
+		if (!A.GetTagValue(TEXT("Skeleton"), Value) || Value != SkeletonTag) continue;
+		OutCandidates++;
+
+		// 同じフォルダ (+2) > 名前がメッシュ名で始まる (+1)。
+		// Interchange は "<メッシュ名>_Anim" をメッシュの隣に置くので、通常は 3 点で一意に決まる。
+		int32 Score = 0;
+		if (A.PackagePath.ToString() == MeshFolder) Score += 2;
+		if (A.AssetName.ToString().StartsWith(MeshName)) Score += 1;
+
+		// 同点は名前順で決める (レジストリの列挙順に依存させないため)。
+		if (Score > BestScore
+			|| (Score == BestScore && A.AssetName.ToString() < Best.AssetName.ToString()))
+		{
+			BestScore = Score;
+			Best = A;
+		}
+	}
+
+	return Best.IsValid() ? Cast<UAnimSequence>(Best.GetAsset()) : nullptr;
+}
+
+FMmdActorResult FMmdActorBuilder::BuildActor(USkeletalMesh* Mesh, const FString& GlbPath)
 {
 	FMmdActorResult Result;
 
@@ -114,8 +167,69 @@ FMmdActorResult FMmdActorBuilder::BuildActor(USkeletalMesh* Mesh)
 	if (auto* MeshTemplate = Cast<USkeletalMeshComponent>(MeshNode->ComponentTemplate))
 	{
 		MeshTemplate->SetSkeletalMeshAsset(Mesh);
-		// 物理は【1】がメッシュ側に割り当てた Post-Process AnimBP で効くので、
-		// ここでアニメーションの設定は触らない。
+
+		// --- アニメーション (VMD 由来のモーション) ---
+		// ★mmd2gltf-gui は VMD を glTF 標準のアニメーションとして焼き込む (IK 解決済み・30fps)。
+		//   UE 標準の Interchange がそれを AnimSequence として取り込んでいるので、
+		//   ここで割り当てるだけで動く。これをしないと、置いたアクターが
+		//   参照ポーズのまま立っているだけになる。
+		//
+		// ★物理との共存: Post-Process AnimBP は再生モードに関わらず後段で必ず走る。
+		//   単発再生 (AnimationSingleNode) にしても【1】の物理はそのまま効き、
+		//   ボーン追従の剛体には書き戻さないので体のモーションも保たれる。
+		//
+		// ★bForceInitAnimScriptInstance=false にすること。ここで触っているのは
+		//   ワールドに登録されていない **コンポーネントテンプレート**で、
+		//   アニメーションインスタンスを作らせる場面ではない。
+		Result.Animation = FindAnimationFor(Mesh, Result.AnimationCandidates);
+		if (Result.Animation != nullptr)
+		{
+			MeshTemplate->SetAnimationMode(EAnimationMode::AnimationSingleNode,
+				/*bForceInitAnimScriptInstance=*/false);
+			MeshTemplate->AnimationData.AnimToPlay = Result.Animation;
+			MeshTemplate->AnimationData.bSavedLooping = true;
+			MeshTemplate->AnimationData.bSavedPlaying = true;
+
+			UE_LOG(LogMmdPhysics, Log,
+				TEXT("[MmdPhysics] アニメーション '%s' を割り当てました (同じスケルトンの候補 %d 本)。"),
+				*Result.Animation->GetName(), Result.AnimationCandidates);
+
+			// ★表情モーフのアニメーションを補う。
+			//   UE 5.5 の Interchange は glTF の weights チャンネルを取りこぼすので、
+			//   .glb を渡してもらえるならここで直接読んでカーブを足す
+			//   (詳しくは MmdMorphAnimation.h)。
+			if (!GlbPath.IsEmpty())
+			{
+				const FMmdMorphAnimResult Morph =
+					FMmdMorphAnimation::ApplyMorphCurves(Mesh, Result.Animation, GlbPath);
+				Result.MorphCurvesAdded = Morph.CurvesAdded;
+				if (!Morph.bSuccess)
+				{
+					// 致命ではない。ボーンのモーションはそのまま動く。
+					UE_LOG(LogMmdPhysics, Warning,
+						TEXT("[MmdPhysics] 表情モーフのアニメーションを補えませんでした: %s"), *Morph.Message);
+				}
+				else if (Morph.CurvesAdded > 0)
+				{
+					SaveAsset(Result.Animation);
+				}
+			}
+			if (Result.AnimationCandidates > 1)
+			{
+				// 1 本しか割り当てられないので、選んだことを明示する。
+				UE_LOG(LogMmdPhysics, Log,
+					TEXT("[MmdPhysics] 候補が複数あるため 1 本を選びました。")
+					TEXT("別のモーションにしたい場合は BP_%s の Mesh コンポーネントの ")
+					TEXT("Anim to Play を差し替えてください。"), *Mesh->GetName());
+			}
+		}
+		else
+		{
+			// モーション無しの .glb (モデルだけの変換) はこちら。異常ではない。
+			UE_LOG(LogMmdPhysics, Log,
+				TEXT("[MmdPhysics] このスケルトンで再生できる AnimSequence が見つからないため、")
+				TEXT("アニメーションは割り当てませんでした (モデルだけの .glb なら正常です)。"));
+		}
 	}
 	SCS->AddNode(MeshNode);   // 最初に足したものがルートになる
 
@@ -152,10 +266,13 @@ FMmdActorResult FMmdActorBuilder::BuildActor(USkeletalMesh* Mesh)
 
 	Result.bSuccess = true;
 	Result.Blueprint = Blueprint;
-	Result.Message = FString::Printf(TEXT("アクターを生成しました: %s (輪郭線 %s / 毛先パス %s)"),
+	Result.Message = FString::Printf(
+		TEXT("アクターを生成しました: %s (輪郭線 %s / 毛先パス %s / アニメーション %s / 表情モーフ %d 本)"),
 		*FullPath,
 		Result.bHasOutline ? TEXT("あり") : TEXT("なし"),
-		Result.bHasSoftPass ? TEXT("あり") : TEXT("なし"));
+		Result.bHasSoftPass ? TEXT("あり") : TEXT("なし"),
+		Result.Animation != nullptr ? *Result.Animation->GetName() : TEXT("なし"),
+		Result.MorphCurvesAdded);
 	UE_LOG(LogMmdPhysics, Log, TEXT("[MmdPhysics] %s"), *Result.Message);
 	return Result;
 }

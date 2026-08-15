@@ -159,7 +159,8 @@ void SMmdImporterWindow::Construct(const FArguments& InArgs)
 					SNew(STextBlock)
 					.Text_Lambda([this]()
 					{
-						return L(TEXT("3. アクターを生成 (本体 + 輪郭線)"), TEXT("3. Build Actor (body + outline)"));
+						return L(TEXT("3. アクターを生成 (本体 + アニメーション + 輪郭線)"),
+						TEXT("3. Build Actor (body + animation + outline)"));
 					})
 				]
 			]
@@ -171,14 +172,20 @@ void SMmdImporterWindow::Construct(const FArguments& InArgs)
 				{
 					return L(
 						TEXT("BP_<メッシュ名> という Blueprint アクターを作ります。")
-						TEXT("スケルタルメッシュと、輪郭線コンポーネント (MmdOutlineComponent) を組んだ状態で出てきます。")
-						TEXT("これをレベルへ置けば、物理も輪郭線も効いた状態になります。")
+						TEXT("スケルタルメッシュ・アニメーション・輪郭線コンポーネント (MmdOutlineComponent) を")
+						TEXT("組んだ状態で出てくるので、レベルへ置けば物理も輪郭線もモーションも効いた状態になります。")
+						TEXT("アニメーションは同じスケルトンで再生できる AnimSequence を自動で探して割り当てます")
+						TEXT("(VMD 入りの .glb なら Interchange が <メッシュ名>_Anim として取り込んでいます)。")
+						TEXT("差し替えたいときは Mesh コンポーネントの Anim to Play を変更してください。")
 						TEXT("輪郭線を描く材質が無いモデルには輪郭線コンポーネントを付けません。")
 						TEXT("【2】のあとに実行してください (輪郭線の有無をマテリアルから見るため)。"),
-						TEXT("Creates a Blueprint actor named BP_<MeshName> with the skeletal mesh and the outline ")
-						TEXT("component (MmdOutlineComponent) already wired up. Drop it into a level and both the ")
-						TEXT("physics and the outline are active. The outline component is skipped for models that ")
-						TEXT("draw no outlines. Run this after step 2 (it reads the outline flag from the materials)."));
+						TEXT("Creates a Blueprint actor named BP_<MeshName> with the skeletal mesh, its animation and ")
+						TEXT("the outline component (MmdOutlineComponent) already wired up. Drop it into a level and ")
+						TEXT("physics, outlines and motion are all active. The animation is picked automatically from ")
+						TEXT("the AnimSequences that play on the same skeleton (for a .glb with a VMD baked in, ")
+						TEXT("Interchange imports it as <MeshName>_Anim). To use a different one, change Anim to Play ")
+						TEXT("on the Mesh component. The outline component is skipped for models that draw no ")
+						TEXT("outlines. Run this after step 2 (it reads the outline flag from the materials)."));
 				})
 			]
 
@@ -254,7 +261,9 @@ FReply SMmdImporterWindow::OnConvertMaterials()
 
 FReply SMmdImporterWindow::OnBuildActor()
 {
-	const FMmdActorResult Result = FMmdActorBuilder::BuildActor(TargetMesh.Get());
+	// .glb も渡す。表情モーフのアニメーションは UE の取り込みで落ちるので、
+	// ここで .glb から直接読んで補うため (MmdMorphAnimation.h)。
+	const FMmdActorResult Result = FMmdActorBuilder::BuildActor(TargetMesh.Get(), GlbPath);
 	StatusText = Result.Message;
 	bStatusIsError = !Result.bSuccess;
 	return FReply::Handled();

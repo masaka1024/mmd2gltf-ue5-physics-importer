@@ -32,6 +32,8 @@ public class MmdPhysicsEditor : ModuleRules
 			// Post-Process Anim Blueprint をプログラムで生成・配線・コンパイルする。
 			"AnimGraph",
 			"AnimGraphRuntime",
+			// 取り込み済み AnimSequence へモーフカーブを足す (UE の glTF 取りこぼしの穴埋め)。
+			"AnimationBlueprintLibrary",
 			"BlueprintGraph",
 			"Kismet",
 			"KismetCompiler",

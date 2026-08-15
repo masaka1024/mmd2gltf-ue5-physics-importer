@@ -8,6 +8,8 @@
 
 #include "Misc/AutomationTest.h"
 #include "HAL/PlatformMisc.h"
+#include "Animation/AnimSequence.h"
+#include "AnimationBlueprintLibrary.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/Blueprint.h"
 #include "Engine/SCS_Node.h"
@@ -39,7 +41,10 @@ bool FMmdActorBuilderTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	const FMmdActorResult R = FMmdActorBuilder::BuildActor(Mesh);
+	// .glb があれば渡す (表情モーフのカーブ補完まで検証する)。無くてもボーンまでは見る。
+	const FString GlbPath = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_PARITY_GLB"));
+
+	const FMmdActorResult R = FMmdActorBuilder::BuildActor(Mesh, GlbPath);
 	AddInfo(R.Message);
 	if (!TestTrue(TEXT("アクターを生成できる"), R.bSuccess)) return false;
 	if (!TestNotNull(TEXT("Blueprint が返る"), R.Blueprint)) return false;
@@ -73,6 +78,85 @@ bool FMmdActorBuilderTest::RunTest(const FString& Parameters)
 	{
 		TestEqual(TEXT("対象のメッシュが割り当たっている"),
 			MeshTemplate->GetSkeletalMeshAsset(), Mesh);
+
+		// --- アニメーション (VMD 由来のモーション) ---
+		// ★これを繋がないと、置いたアクターが参照ポーズのまま立っているだけになる。
+		//   モーション入りの .glb かどうかで期待値が変わるので、探索結果を正として突き合わせる。
+		int32 Candidates = 0;
+		UAnimSequence* Expected = FMmdActorBuilder::FindAnimationFor(Mesh, Candidates);
+		AddInfo(FString::Printf(TEXT("同じスケルトンで再生できる AnimSequence: %d 本"), Candidates));
+		TestEqual(TEXT("戻り値の候補数が探索結果と一致する"), R.AnimationCandidates, Candidates);
+		TestEqual(TEXT("戻り値のアニメーションが探索結果と一致する"), R.Animation, Expected);
+
+		if (Expected != nullptr)
+		{
+			TestEqual(TEXT("アニメーションが割り当たっている"),
+				Cast<UAnimSequence>(MeshTemplate->AnimationData.AnimToPlay), Expected);
+			// ★Post-Process AnimBP (物理) は再生モードに関わらず後段で走るので、
+			//   単発再生にしても物理と共存する。
+			TestEqual(TEXT("単発再生モードになっている"),
+				(int32)MeshTemplate->GetAnimationMode(), (int32)EAnimationMode::AnimationSingleNode);
+			TestTrue(TEXT("再生する設定になっている"), MeshTemplate->AnimationData.bSavedPlaying != 0);
+			TestTrue(TEXT("ループする設定になっている"), MeshTemplate->AnimationData.bSavedLooping != 0);
+
+			// --- 表情モーフのアニメーション ---
+			// ★UE 5.5 の Interchange は glTF の weights チャンネルを取りこぼすので、
+			//   プラグインが .glb から直接読んでカーブを足している。
+			//   これが効かないと「体は踊るのに顔が動かない」という壊れ方をする。
+			if (!GlbPath.IsEmpty())
+			{
+				TArray<FName> Curves;
+				UAnimationBlueprintLibrary::GetAnimationCurveNames(
+					Expected, ERawCurveTrackTypes::RCT_Float, Curves);
+				AddInfo(FString::Printf(TEXT("アニメーションのカーブ: %d 本 (今回追加 %d 本)"),
+					Curves.Num(), R.MorphCurvesAdded));
+
+				// カーブ名はメッシュのモーフターゲット名と一致していなければ何も動かない。
+				int32 Unmatched = 0;
+				for (const FName& Name : Curves)
+				{
+					if (Mesh->FindMorphTarget(Name) == nullptr) Unmatched++;
+				}
+				TestEqual(TEXT("カーブ名がすべてモーフターゲットに対応している"), Unmatched, 0);
+
+				if (Curves.Num() > 0)
+				{
+					// 値が入っているか (全部 0 なら足した意味がない)。
+					float MaxSeen = 0.0f;
+					for (const FName& Name : Curves)
+					{
+						// モーションのどこかで開くはずなので、数点だけ見る。
+						for (int32 i = 0; i <= 20; i++)
+						{
+							const float Time = Expected->GetPlayLength() * (i / 20.0f);
+							MaxSeen = FMath::Max(MaxSeen, Expected->EvaluateCurveData(Name, Time));
+						}
+					}
+					TestTrue(FString::Printf(TEXT("モーフのカーブに 0 でない値がある (最大 %.3f)"), MaxSeen),
+						MaxSeen > 0.0f);
+				}
+				else
+				{
+					AddWarning(TEXT("アニメーションにモーフのカーブが 1 本もありません。")
+						TEXT("モーフキーを持たないモーションなら正常です。"));
+				}
+
+				// 2 回目に二重で足さないこと (既存カーブは触らない)。
+				const FMmdActorResult Twice = FMmdActorBuilder::BuildActor(Mesh, GlbPath);
+				TArray<FName> CurvesAfter;
+				UAnimationBlueprintLibrary::GetAnimationCurveNames(
+					Expected, ERawCurveTrackTypes::RCT_Float, CurvesAfter);
+				TestEqual(TEXT("作り直してもカーブが増えない"), CurvesAfter.Num(), Curves.Num());
+				TestEqual(TEXT("2 回目は 1 本も追加しない"), Twice.MorphCurvesAdded, 0);
+			}
+		}
+		else
+		{
+			TestNull(TEXT("見つからなければ割り当てない"),
+				(UObject*)MeshTemplate->AnimationData.AnimToPlay);
+			AddWarning(TEXT("このスケルトンで再生できる AnimSequence がありません。")
+				TEXT("モデルだけの .glb (--vmd 無し) なら正常です。"));
+		}
 	}
 
 	// --- 輪郭線 ---
