@@ -108,6 +108,28 @@ namespace
 	}
 }
 
+FString FMmdMorphAnimation::MakeRigSafeName(const FString& In)
+{
+	/** URigHierarchy::GetMaxNameLength()。 */
+	constexpr int32 KMaxRigNameLength = 100;
+
+	FString Out = In;
+	for (int32 Index = 0; Index < Out.Len(); Index++)
+	{
+		TCHAR& C = Out[Index];
+		const bool bGoodChar = FChar::IsAlpha(C)                          // 文字 (仮名・漢字も通る)
+			|| FChar::IsDigit(C)                                          // 0-9
+			|| C == TEXT('_') || C == TEXT('-') || C == TEXT('.') || C == TEXT('|')
+			|| (Index > 0 && C == TEXT(' '));                             // 空白は 2 文字目以降のみ
+		if (!bGoodChar) C = TEXT('_');
+	}
+	if (Out.Len() > KMaxRigNameLength)
+	{
+		Out.LeftChopInline(Out.Len() - KMaxRigNameLength);
+	}
+	return Out;
+}
+
 FMmdMorphAnimResult FMmdMorphAnimation::ApplyMorphCurves(USkeletalMesh* Mesh, UAnimSequence* Anim,
 	const FString& GlbPath)
 {
@@ -236,6 +258,17 @@ FMmdMorphAnimResult FMmdMorphAnimation::ApplyMorphCurves(USkeletalMesh* Mesh, UA
 			continue;
 		}
 
+		// ★リグの名前規則で変わってしまう名前は足さない。
+		//   足すと (a) 潰れた名前が他のモーフと衝突して**エディタが落ちる**か、
+		//   (b) 落ちなくてもカーブ名がリグ側の名前に化けてモーフに繋がらない。
+		//   詳しくは MmdMorphAnimation.h の注記。
+		if (MakeRigSafeName(TargetNames[Track]) != TargetNames[Track])
+		{
+			Result.SkippedUnsafeName++;
+			Result.UnsafeNames.Add(TargetNames[Track]);
+			continue;
+		}
+
 		// 既にカーブがあるならキーは触らない (UE 側が直った場合に二重で入れないため)。
 		// ただしスケルトンへの登録だけは確かめる (上の EnsureMorphMetaData の注記を参照)。
 		if (ExistingCurves.Contains(CurveName))
@@ -263,6 +296,10 @@ FMmdMorphAnimResult FMmdMorphAnimation::ApplyMorphCurves(USkeletalMesh* Mesh, UA
 
 		EnsureMorphMetaData(CurveName);
 
+		// 同じ名前が targetNames に二度出ても二重で入れない
+		// (ExistingCurves はループの前に一度だけ集めたものなので、ここで足しておく)。
+		ExistingCurves.Add(CurveName);
+
 		Result.CurvesAdded++;
 		Result.KeysAdded += KeyTimes.Num();
 	}
@@ -270,10 +307,21 @@ FMmdMorphAnimResult FMmdMorphAnimation::ApplyMorphCurves(USkeletalMesh* Mesh, UA
 	Result.bSuccess = true;
 	Result.Message = FString::Printf(
 		TEXT("モーフのアニメーションを追加しました: %d / %d トラック (キー %d / ")
-		TEXT("モーフターゲット無しで除外 %d / 既存のまま %d / スケルトンへ登録 %d)"),
+		TEXT("モーフターゲット無しで除外 %d / 名前がリグに載らず除外 %d / ")
+		TEXT("既存のまま %d / スケルトンへ登録 %d)"),
 		Result.CurvesAdded, Result.TotalTracks, Result.KeysAdded,
-		Result.SkippedNoMorphTarget, Result.SkippedExisting, Result.MorphMetaDataSet);
+		Result.SkippedNoMorphTarget, Result.SkippedUnsafeName,
+		Result.SkippedExisting, Result.MorphMetaDataSet);
 	UE_LOG(LogMmdPhysics, Log, TEXT("[MmdPhysics] %s"), *Result.Message);
+
+	if (Result.SkippedUnsafeName > 0)
+	{
+		// 落ちないための除外なので、どのモーフを諦めたかは必ず残す。
+		UE_LOG(LogMmdPhysics, Warning,
+			TEXT("[MmdPhysics] 次のモーフは名前が UE のリグ規則に載らないため飛ばしました ")
+			TEXT("(英数字と _ - . | 以外の記号は使えません): %s"),
+			*FString::Join(Result.UnsafeNames, TEXT(", ")));
+	}
 	return Result;
 }
 

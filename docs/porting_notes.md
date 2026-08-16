@@ -805,6 +805,7 @@ $env:MMD_TOON_RAMP_PACKAGE = "/Game/MmdToonRampTest"
 | `MmdPhysics.Editor.MaterialPlan` | `alphaMode` / `alphaClass` / `origTexture` / `alphaCutoff` から親マスターとマスク閾値が決まる分岐。**データ不要** |
 | `MmdPhysics.Editor.ToonRamp` | 近似トゥーンのテーブル（明部色 / 陰部色 / 境界位置 / ぼかし幅）が生成画素に出ているか。最上段＝明部色・最下段＝陰部色、境界でちょうど中間色、ぼかし幅の外は平坦。**データ不要** |
 | `MmdPhysics.Editor.ToonRampAsset` | 近似トゥーンを実際に `UTexture2D` アセットにする経路（テクスチャ設定と、2 回目に作り直さないこと）。`MMD_TOON_RAMP_PACKAGE` が未設定ならスキップ |
+| `MmdPhysics.Editor.MorphCurveName` | モーフ名が UE のリグ名規則に載るか（`▲` `∧` `□` が同じ名前に潰れて衝突すること、仮名・漢字・英数字は無事なこと、100 文字で切られること）。**データ不要** |
 | `MmdPhysics.Bridge.UeSpace` | 位置と回転が同一の純回転か（行列式 +1） |
 | `MmdPhysics.Bridge.ImportConvention` | 実際に取り込んだスケルトンと座標系が合うか |
 | `MmdPhysics.Editor.WirePhysics` | 配線 → 評価 → 書き戻しが端から端まで通るか |

@@ -32,6 +32,29 @@
 //   したがって登録は**カーブを足したときだけでなく、既にカーブがある場合も**必要で、
 //   さらに**スケルトンのアセットを保存**しないとエディタを開き直した時点で消える
 //   (「体は踊るのに顔だけ動かない」という壊れ方をする)。
+//
+// ★記号だけのモーフ名 (`▲` `∧` `□` など) はカーブにできない。飛ばす。
+//
+//   UE 5.5 の AnimSequence は中身が **Sequencer のデータモデル**
+//   (AnimationData プラグイン / 既定で有効) で、float カーブの実体は
+//   FK ControlRig のスカラーパラメータチャンネルとして持たれている。
+//   そのチャンネルの引き当ては
+//     URigHierarchy::GetSanitizedName(カーブ名)
+//   で行われ (AnimSequencerController.cpp)、サニタイズは
+//   **英数字と `_ - . |` 以外を `_` に潰す** (RigHierarchy.cpp の SanitizeName)。
+//   仮名・漢字は FChar::IsAlpha を通るので無事だが、記号は潰れる。
+//
+//   これが二重に効く:
+//     1. 潰れた名前が衝突する。`▲` も `∧` も `□` も `_` になるので、
+//        2 本目のカーブを足した時点で 1 本目と同じチャンネルを掴み、
+//        UE 5.5 は `check(bUpdateKey || ...)` で**エディタごと落ちる**
+//        (AnimSequencerController.cpp:3386)。
+//     2. 衝突しなくても動かない。カーブを足すと UE は
+//        RegenerateLegacyCurveData() でカーブ一覧を**リグ側の名前から作り直す**ため、
+//        `はんっ！` のカーブは `はんっ_` に化けてモーフ名と一致しなくなる。
+//
+//   どのみち動かせないので、名前がサニタイズで変わるトラックは足さずに数えて報告する。
+//   (UE 側がサニタイズ前の名前で引き当てるようになったら、この除外は消せる)
 // ===========================================================================
 
 #pragma once
@@ -59,6 +82,13 @@ struct MMDPHYSICSEDITOR_API FMmdMorphAnimResult
 	/** 既にカーブがあったため触らなかった数 (UE 側が直った場合など)。 */
 	int32 SkippedExisting = 0;
 	/**
+	 * リグの名前規則に載らない名前だったので飛ばした数 (下の注記を参照)。
+	 * `▲` `∧` `□` のような記号だけの MMD 標準モーフがここに入る。
+	 */
+	int32 SkippedUnsafeName = 0;
+	/** 上で飛ばしたモーフ名。ログとメッセージに出す。 */
+	TArray<FString> UnsafeNames;
+	/**
 	 * スケルトンへ「モーフを動かすカーブ」として登録し直した数。
 	 * ★0 でないなら **スケルトンのアセットを保存しないと次のセッションで効かない**。
 	 *   呼び出し側 (FMmdActorBuilder) が保存する。
@@ -78,4 +108,13 @@ public:
 	 * @param GlbPath  mmd2gltf-gui が出力した .glb
 	 */
 	static FMmdMorphAnimResult ApplyMorphCurves(USkeletalMesh* Mesh, UAnimSequence* Anim, const FString& GlbPath);
+
+	/**
+	 * UE のリグ階層が名前に許す文字だけにした名前を返す。
+	 * 返り値が引数と違うモーフはカーブにできない (上の注記を参照)。
+	 *
+	 * ★ControlRig の URigHierarchy::SanitizeName と同じ規則を写したもの。
+	 *   これ 1 箇所のために ControlRig モジュールへ依存したくないので手元に持つ。
+	 */
+	static FString MakeRigSafeName(const FString& In);
 };
