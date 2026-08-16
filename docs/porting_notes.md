@@ -806,6 +806,7 @@ $env:MMD_TOON_RAMP_PACKAGE = "/Game/MmdToonRampTest"
 | `MmdPhysics.Editor.ToonRamp` | 近似トゥーンのテーブル（明部色 / 陰部色 / 境界位置 / ぼかし幅）が生成画素に出ているか。最上段＝明部色・最下段＝陰部色、境界でちょうど中間色、ぼかし幅の外は平坦。**データ不要** |
 | `MmdPhysics.Editor.ToonRampAsset` | 近似トゥーンを実際に `UTexture2D` アセットにする経路（テクスチャ設定と、2 回目に作り直さないこと）。`MMD_TOON_RAMP_PACKAGE` が未設定ならスキップ |
 | `MmdPhysics.Editor.MorphCurveName` | モーフ名が UE のリグ名規則に載るか（`▲` `∧` `□` が同じ名前に潰れて衝突すること、仮名・漢字・英数字は無事なこと、100 文字で切られること）。**データ不要** |
+| `MmdPhysics.Editor.ChainStability` | **アニメーションを再生しながら**、揺れ物の鎖のボーン間距離が参照ポーズから**伸びも縮みも**しないか（親フレームを取り違えて焼かれた鎖は末端が伸びて手前が縮むので、片側だけ見ると取りこぼす）。`MMD_CONV_SKELMESH` と `MMD_PARITY_GLB` を使う。切り分け用に `MMD_CHAIN_SECONDS` / `MMD_CHAIN_NOANIM`（静止のまま回す）/ `MMD_CHAIN_NOPHYS`（物理を切る）で条件を変えられる。★見ているのは長さだけで、向きの誤りは検出できない |
 | `MmdPhysics.Bridge.UeSpace` | 位置と回転が同一の純回転か（行列式 +1） |
 | `MmdPhysics.Bridge.ImportConvention` | 実際に取り込んだスケルトンと座標系が合うか |
 | `MmdPhysics.Editor.WirePhysics` | 配線 → 評価 → 書き戻しが端から端まで通るか |
