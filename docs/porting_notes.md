@@ -722,6 +722,8 @@ $env:MMD_TOON_RAMP_PACKAGE = "/Game/MmdToonRampTest"
 | `MmdPhysics.Core.Equilibrium` | 拘束が保持され Baumgarte が余計なエネルギーを注いでいないか |
 | `MmdPhysics.Core.Pendulum` | 重力・並進ロック・減衰が機能しているか |
 | `MmdPhysics.Core.GlbParity` | **C# 版とビット一致するか**（実モデル 300 フレーム） |
+| `MmdPhysics.Core.Accumulator` | 固定刻みアキュムレータが積み残しを捨てて実時間へ復帰するか。**データ不要** |
+| `MmdPhysics.Core.IdleSettle` | 静止入力で揺れ物が収まるか（振れ幅・周波数・最大速度を剛体別に出す）。`MMD_PARITY_GLB` を使う。切り分け用に `MMD_IDLE_SECONDS` / `_FIXED_HZ` / `_SUBSTEPS` / `_ITER` / `_JOINTS_FIRST` / `_SPLIT` / `_JOINT_SPLIT` / `_GRAVITY` で設定を差し替えられる |
 | `MmdPhysics.Core.MaterialReader` | 各マテリアルの `extras.mmd` を読めているか |
 | `MmdPhysics.Core.GlbImageExtract` | 手で組んだ GLB で `alphaCutoff` / `origTexture` の読み取りと画像の切り出し（`bufferView.byteOffset` の適用、範囲外の拒否）。**データ不要** |
 | `MmdPhysics.Editor.MaterialPlan` | `alphaMode` / `alphaClass` / `origTexture` / `alphaCutoff` から親マスターとマスク閾値が決まる分岐。**データ不要** |
