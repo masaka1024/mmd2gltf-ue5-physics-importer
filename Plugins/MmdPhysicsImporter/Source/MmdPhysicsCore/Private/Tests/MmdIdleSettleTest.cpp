@@ -41,6 +41,60 @@ namespace
 		}
 		void Reset() { *this = FIdleTrack(); }
 	};
+
+	/** 波形の素性。振れ幅だけでは「ゆっくり大きく揺れる」と「細かく震える」を区別できない。 */
+	struct FIdleWave
+	{
+		float Hz = 0.0f;              // 支配軸の平均まわりの往復回数 / 秒
+		float MaxSpeedPerSec = 0.0f;  // 1 フレームの最大移動量を秒速へ直したもの
+		int32 Axis = 0;               // 0=x 1=y 2=z
+	};
+
+	float AxisOf(const Vec3& V, int32 Axis) { return Axis == 0 ? V.x : (Axis == 1 ? V.y : V.z); }
+
+	FIdleWave AnalyzeWave(const TArray<Vec3>& Samples, float DurationSeconds)
+	{
+		FIdleWave Out;
+		if (Samples.Num() < 4 || DurationSeconds <= 0.0f) return Out;
+
+		// 振れ幅が最大の軸を支配軸とする。
+		float BestRange = -1.0f;
+		for (int32 A = 0; A < 3; A++)
+		{
+			float Lo = FLT_MAX, Hi = -FLT_MAX;
+			for (const Vec3& S : Samples)
+			{
+				const float V = AxisOf(S, A);
+				Lo = FMath::Min(Lo, V); Hi = FMath::Max(Hi, V);
+			}
+			if (Hi - Lo > BestRange) { BestRange = Hi - Lo; Out.Axis = A; }
+		}
+
+		// 平均を基準に符号反転を数える。ノイズで数え過ぎないよう振れ幅の 10% を不感帯にする。
+		float Mean = 0.0f;
+		for (const Vec3& S : Samples) Mean += AxisOf(S, Out.Axis);
+		Mean /= Samples.Num();
+
+		const float Dead = BestRange * 0.1f;
+		int32 Crossings = 0, Sign = 0;
+		for (const Vec3& S : Samples)
+		{
+			const float D = AxisOf(S, Out.Axis) - Mean;
+			if (D > Dead && Sign <= 0) { if (Sign != 0) Crossings++; Sign = 1; }
+			else if (D < -Dead && Sign >= 0) { if (Sign != 0) Crossings++; Sign = -1; }
+		}
+		// 1 往復 = 反転 2 回。
+		Out.Hz = (Crossings * 0.5f) / DurationSeconds;
+
+		// フレーム間の最大移動量 (60fps で刻んでいるので 60 倍が秒速)。
+		float MaxStep = 0.0f;
+		for (int32 i = 1; i < Samples.Num(); i++)
+		{
+			MaxStep = FMath::Max(MaxStep, (Samples[i] - Samples[i - 1]).Length());
+		}
+		Out.MaxSpeedPerSec = MaxStep * 60.0f;
+		return Out;
+	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMmdIdleSettleTest, "MmdPhysics.Core.IdleSettle",
@@ -105,12 +159,19 @@ bool FMmdIdleSettleTest::RunTest(const FString& Parameters)
 	FirstWindow.Init(0.0f, B->Bodies.Num());
 	LastWindow.Init(0.0f, B->Bodies.Num());
 
+	// 最後の窓は波形をそのまま残す (周波数と速度を出すため)。
+	const int32 SignalStart = TotalFrames - WindowFrames;
+	TArray<TArray<Vec3>> Signal;
+	Signal.SetNum(B->Bodies.Num());
+	for (TArray<Vec3>& S : Signal) S.Reserve(WindowFrames);
+
 	for (int32 f = 0; f < TotalFrames; f++)
 	{
 		B->World.StepSimulation(1.0f / 60.0f);
 		for (int32 i = 0; i < B->Bodies.Num(); i++)
 		{
 			Window[i].Add(B->Bodies[i]->WorldTransform.Origin);
+			if (f >= SignalStart) Signal[i].Add(B->Bodies[i]->WorldTransform.Origin);
 		}
 
 		const int32 WindowIndex = f / WindowFrames;
@@ -134,12 +195,15 @@ bool FMmdIdleSettleTest::RunTest(const FString& Parameters)
 	Order.Sort([&LastWindow](int32 A, int32 C) { return LastWindow[A] > LastWindow[C]; });
 
 	AddInfo(FString::Printf(TEXT("静止入力で %g 秒 [%s]。動的剛体 %d 件。"), Seconds, *Config, Order.Num()));
-	AddInfo(TEXT("最後の 5 秒で振れが大きい剛体 (振れ幅 = 各軸の最大-最小):"));
+	AddInfo(TEXT("最後の 5 秒 (振れ幅 / 周波数 / 最大速度):"));
 	for (int32 k = 0; k < FMath::Min(10, Order.Num()); k++)
 	{
 		const int32 i = Order[k];
-		AddInfo(FString::Printf(TEXT("  %-24s 最初の5秒 %.4f cm → 最後の5秒 %.4f cm"),
-			*B->Bodies[i]->Name, FirstWindow[i] * ToCm, LastWindow[i] * ToCm));
+		const FIdleWave W = AnalyzeWave(Signal[i], WindowFrames / 60.0f);
+		AddInfo(FString::Printf(
+			TEXT("  %-22s 振れ %6.3f cm (最初 %6.3f) | %5.2f Hz | 最大 %6.2f cm/s | 軸 %s"),
+			*B->Bodies[i]->Name, LastWindow[i] * ToCm, FirstWindow[i] * ToCm,
+			W.Hz, W.MaxSpeedPerSec * ToCm, W.Axis == 0 ? TEXT("x") : (W.Axis == 1 ? TEXT("y") : TEXT("z"))));
 	}
 
 	float MaxLast = 0.0f, MaxFirst = 0.0f, SumLast = 0.0f;

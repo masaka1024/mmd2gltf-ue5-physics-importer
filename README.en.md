@@ -124,6 +124,7 @@ and logs an actionable error if the import convention does not match.
 | All outlines are the same color | Check that `EdgeColor` is set on the body material instances — the component reads the color from there |
 | Outlines lag behind when the expression changes | Check that `MmdOutlineComponent` is updating every frame (`Draw Outline` enabled, component Tick not disabled) |
 | Materials render grey | Look for `[MmdPhysics] マテリアルのコンパイルエラー` in the output log |
+| Hair or skirt keeps swaying even when the model is standing still | Check that **`Use Split Impulse` and `Use Joint Split Impulse`** are both on in the MMD Physics node (they are on by default). With them off, positional correction leaks into real velocity and keeps pumping energy into the swaying bodies, which then resonate at their natural frequency. For the sway that remains even with them on, see "静止しているのに揺れ続ける" in [docs/porting_notes.md](docs/porting_notes.md) |
 | Hair or skirt is stuck inside the body and never recovers | It has settled into a penetrating equilibrium, so waiting will not fix it. Call **`Reset MMD Physics`** from Blueprint (pass the Mesh component) to re-align the bodies to the current bone pose — do this after switching motions, on a loop wrap, or after teleporting the actor. Stopping and restarting PIE also resets it |
 | The log reports the physics went NaN | Raise `SubSteps`. Happens on models with very stiff springs or very light bodies |
 

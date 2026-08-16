@@ -57,6 +57,33 @@ struct MMDPHYSICSRUNTIME_API FAnimNode_MmdPhysics : public FAnimNode_SkeletalCon
 	int32 SolverIterations = 10;
 
 	/**
+	 * 位置補正 (Baumgarte) を擬似速度で解き、実速度に残さない。
+	 *
+	 * ★静止しているはずの場面で揺れ物が揺れ続けるのを抑える。既定 ON。
+	 *
+	 * 切ると、貫入やジョイントのずれを直すための補正がそのまま実速度になり、
+	 * 揺れ物へエネルギーを注ぎ続ける。減衰が強くても止まらない (減衰は拘束を解く前に
+	 * 掛かるため、解いた後の速度には効かない) ので、固有振動数での共振が持続する。
+	 *
+	 * IA での実測 (ボーンを動かさず 30 秒。最後の 5 秒の振れ幅):
+	 *   両方 OFF … 最大 14.18cm / 平均 3.77cm (スカートが 1.5Hz で振れ続け、時間とともに増える)
+	 *   両方 ON  … 最大  7.17cm / 平均 0.96cm (振れは時間とともに減る)
+	 *   接触のみ 13.99 / 3.28、ジョイントのみ 12.63 / 2.32 = **両方要る**
+	 * 反復を増やす (8.91/1.72) / Bullet 順 (8.67/1.56) はいずれも悪化した。
+	 *
+	 * ★コア (PhysicsWorld) の既定は OFF のまま。数値パリティテストは移植元 C# と
+	 *   ビット一致で比べるので、コア側の既定は動かせない。刻み (1/60x2) と同じく、
+	 *   **ノードだけが移植元の調整値を持つ**構造にしてある
+	 *   (docs/porting_notes.md「ソルバ既定値はノードとコアで違う」)。
+	 */
+	UPROPERTY(EditAnywhere, Category = "Solver")
+	bool bUseSplitImpulse = true;
+
+	/** ジョイント側の位置補正を擬似速度で解く。上の bUseSplitImpulse と対で使う。 */
+	UPROPERTY(EditAnywhere, Category = "Solver")
+	bool bUseJointSplitImpulse = true;
+
+	/**
 	 * 実効刻み = FixedTimeStep / SubSteps。既定 (1/60)/2 = 1/120。
 	 * 細刻み化は SubSteps 側で行うこと (下の FixedTimeStep の注記を参照)。
 	 */

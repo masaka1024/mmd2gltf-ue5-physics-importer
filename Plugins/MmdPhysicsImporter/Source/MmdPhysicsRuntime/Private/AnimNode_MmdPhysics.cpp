@@ -112,6 +112,8 @@ void FAnimNode_MmdPhysics::ApplySolverSettings()
 	Builder->World.SolverIterations = FMath::Max(1, SolverIterations);
 	Builder->World.SubSteps = FMath::Max(1, SubSteps);
 	Builder->World.FixedTimeStep = FMath::Max(1e-4f, FixedTimeStep);
+	Builder->World.UseSplitImpulse = bUseSplitImpulse;
+	Builder->World.UseJointSplitImpulse = bUseJointSplitImpulse;
 }
 
 void FAnimNode_MmdPhysics::InitializeBoneReferences(const FBoneContainer& RequiredBones)
