@@ -153,6 +153,13 @@ struct MMDPHYSICSEDITOR_API FMmdMaterialResult
 	int32 OrigTextureApplied = 0;
 	/** GLB バイナリから取り出してアセット化したテクスチャ数。 */
 	int32 ExtractedTextures = 0;
+	/**
+	 * 色以外 (法線マップなど) として取り込まれていたのを色に直したテクスチャ数。
+	 * ★UE のインポータは青紫っぽい画像を法線マップと**推定**する。MMD の髪
+	 *   (青緑〜紫) が引っかかると、青チャンネルが落ちて髪が黄緑に描かれる。
+	 *   詳しくは MmdMaterialConversion.cpp の EnsureColorTexture の注記。
+	 */
+	int32 RetypedTextures = 0;
 	/** 輪郭線フラグ (PMX flags bit4) が立っている材質の数。 */
 	int32 WithOutline = 0;
 	/**

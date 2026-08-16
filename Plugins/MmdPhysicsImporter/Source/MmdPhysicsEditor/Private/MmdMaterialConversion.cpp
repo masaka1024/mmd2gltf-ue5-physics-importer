@@ -203,13 +203,52 @@ namespace
 			{
 				Tex = Extract(TextureIndex);
 			}
+			EnsureColorTexture(Tex);
 			Cache.Add(TextureIndex, Tex);
 			return Tex;
 		}
 
 		int32 NumExtracted() const { return ExtractedCount; }
+		int32 NumRetyped() const { return RetypedCount; }
 
 	private:
+		/**
+		 * 色として使うテクスチャの取り込み設定を正す。直したら true。
+		 *
+		 * ★UE のテクスチャインポータは「青紫っぽい画像は法線マップだろう」と
+		 *   **中身から推定**して CompressionSettings=TC_Normalmap / sRGB=false を立てる
+		 *   (UTextureFactory の法線マップ推定。Interchange 経由でも同じ)。
+		 *   MMD の髪テクスチャは青緑〜紫が主で、法線マップの基準色 (128,128,255) に
+		 *   近いため引っかかる (Tda式初音ミク・アペンドの hair_MikuAp.tga で実測)。
+		 *
+		 *   こうなると壊れ方が派手:
+		 *     ・TC_Normalmap は BC5 圧縮で **青チャンネルを持たない**。色として読むと青が 0
+		 *     ・sRGB=false なので、残った RG がリニア値として扱われガンマも外れる
+		 *   実測では青緑の髪 (135,159,208) が黄緑 (196,210,46) で描かれた
+		 *   (計算どおり: 青を落として sRGB エンコードすると (192,207,0))。
+		 *
+		 *   MMD の材質が指すテクスチャ (base / toon / sphere) は**すべて色**なので、
+		 *   ここで一律に色として取り込み直す。推定が当たることは無い。
+		 */
+		bool EnsureColorTexture(UTexture2D* Tex)
+		{
+			if (Tex == nullptr) return false;
+			if (Tex->CompressionSettings == TC_Default && Tex->SRGB) return false;
+
+			UE_LOG(LogMmdPhysics, Warning,
+				TEXT("[MmdPhysics] テクスチャ '%s' が色以外 (圧縮 %d / sRGB %d) で取り込まれていたので")
+				TEXT("色として取り込み直します。"),
+				*Tex->GetName(), static_cast<int32>(Tex->CompressionSettings), Tex->SRGB ? 1 : 0);
+
+			Tex->CompressionSettings = TC_Default;
+			Tex->SRGB = true;
+			Tex->PostEditChange();          // ここで再圧縮が走る
+			Tex->MarkPackageDirty();
+			SavePackageOfAsset(Tex);        // 保存しないと次に開いたとき元に戻る
+			RetypedCount++;
+			return true;
+		}
+
 		UTexture2D* Extract(int32 TextureIndex)
 		{
 			// GLB の読み込みは全部インポート済みなら不要なので、最初に要ったときだけ行う。
@@ -290,6 +329,7 @@ namespace
 		GlbImageExtractor Extractor;
 		bool bPrepared = false;
 		int32 ExtractedCount = 0;
+		int32 RetypedCount = 0;
 		TMap<int32, UTexture2D*> Cache;
 	};
 }
@@ -1340,6 +1380,7 @@ FMmdMaterialResult FMmdMaterialConversion::ConvertMaterials(USkeletalMesh* Mesh,
 	}
 
 	Result.ExtractedTextures = Textures.NumExtracted();
+	Result.RetypedTextures = Textures.NumRetyped();
 
 	// ★2 パス目を使う材質があるなら、本体が全部 Masked でも半透明マスターは要る。
 	//   UMmdSoftPassComponent がこれを親にして 2 パス目を描くため。
@@ -1391,9 +1432,10 @@ FMmdMaterialResult FMmdMaterialConversion::ConvertMaterials(USkeletalMesh* Mesh,
 	Result.Message = FString::Printf(
 		TEXT("マテリアルを変換しました: %d / %d スロット ")
 		TEXT("(半透明 %d〈うち昇格 %d・貼り付け材質 %d〉/ 無加工テクスチャ %d / GLB から抽出 %d / ")
-		TEXT("近似トゥーン %d / マスター: %s%s)"),
+		TEXT("色に直した %d / 近似トゥーン %d / マスター: %s%s)"),
 		Result.Converted, Result.Total, Result.Translucent, Result.Promoted, Result.Overlay,
-		Result.OrigTextureApplied, Result.ExtractedTextures, Result.ApproxToon, KMasterName,
+		Result.OrigTextureApplied, Result.ExtractedTextures, Result.RetypedTextures,
+		Result.ApproxToon, KMasterName,
 		Result.Translucent > 0 ? TEXT(" + M_MmdToonTranslucent") : TEXT(""));
 	UE_LOG(LogMmdPhysics, Log, TEXT("[MmdPhysics] %s"), *Result.Message);
 	return Result;

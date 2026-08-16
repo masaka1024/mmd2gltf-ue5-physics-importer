@@ -386,6 +386,33 @@ bool FMmdMaterialConversionTest::RunTest(const FString& Parameters)
 			if (Info->HasEdge()) OutlineCount++;
 		}
 
+		// --- テクスチャが「色」として取り込まれているか ---
+		//
+		// ★UE のテクスチャインポータは中身から法線マップかどうかを**推定**する。
+		//   MMD の髪テクスチャ (青緑〜紫) は法線マップの基準色 (128,128,255) に近いので
+		//   引っかかり、TC_Normalmap (BC5 = 青チャンネル無し) + sRGB=false で取り込まれる。
+		//   そのまま色として読むと青が 0 になり、青緑の髪が**黄緑**で描かれる
+		//   (Tda式初音ミク・アペンドで実測)。材質が指すテクスチャは全て色なので、
+		//   変換が直しているはず。詳しくは MmdMaterialConversion.cpp の EnsureColorTexture。
+		for (const TCHAR* TexParam : { TEXT("BaseColorTex"), TEXT("ToonTex"), TEXT("SphereTex") })
+		{
+			UTexture* Tex = nullptr;
+			if (!MI->GetTextureParameterValue(FMaterialParameterInfo(TexParam), Tex)) continue;
+			UTexture2D* Tex2D = Cast<UTexture2D>(Tex);
+			if (Tex2D == nullptr) continue;
+			// 既定の白テクスチャ (パラメータ未設定) は対象外。
+			if (Tex2D->GetPathName().StartsWith(TEXT("/Engine/"))) continue;
+
+			if (Tex2D->CompressionSettings != TC_Default || !Tex2D->SRGB)
+			{
+				AddError(FString::Printf(
+					TEXT("スロット '%s' の %s ('%s') が色として取り込まれていない ")
+					TEXT("(圧縮 %d / sRGB %d)。色が化けます。"),
+					*SlotName, TexParam, *Tex2D->GetName(),
+					static_cast<int32>(Tex2D->CompressionSettings), Tex2D->SRGB ? 1 : 0));
+			}
+		}
+
 		// --- origTexture: BaseColorTex が無加工版に差し替わっているか ---
 		if (Plan.bUseOrigTexture)
 		{
