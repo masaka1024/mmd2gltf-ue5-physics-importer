@@ -8,7 +8,9 @@
 
 #include "Misc/AutomationTest.h"
 #include "HAL/PlatformMisc.h"
+#include "Animation/AnimCurveMetadata.h"
 #include "Animation/AnimSequence.h"
+#include "Animation/Skeleton.h"
 #include "AnimationBlueprintLibrary.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/Blueprint.h"
@@ -118,6 +120,24 @@ bool FMmdActorBuilderTest::RunTest(const FString& Parameters)
 					if (Mesh->FindMorphTarget(Name) == nullptr) Unmatched++;
 				}
 				TestEqual(TEXT("カーブ名がすべてモーフターゲットに対応している"), Unmatched, 0);
+
+				// ★名前が合っているだけでは動かない。スケルトンの curve metadata に
+				//   「モーフを動かすカーブ」と登録されていないと、UE はカーブを読んでも
+				//   モーフへ繋がない (FBoneContainer がここから MorphTarget フラグを作る)。
+				//   登録はスケルトン側にあるので、保存されていなければ次にエディタを
+				//   開いた時点で消える = 体は踊るのに顔だけ動かない状態になる。
+				if (USkeleton* Skeleton = Expected->GetSkeleton())
+				{
+					int32 Unregistered = 0;
+					for (const FName& Name : Curves)
+					{
+						const FCurveMetaData* Meta = Skeleton->GetCurveMetaData(Name);
+						if (Meta == nullptr || !Meta->Type.bMorphtarget) Unregistered++;
+					}
+					TestEqual(TEXT("カーブがスケルトンにモーフ用として登録されている"), Unregistered, 0);
+					TestFalse(TEXT("スケルトンが未保存のまま残っていない"),
+						Skeleton->GetOutermost()->IsDirty());
+				}
 
 				if (Curves.Num() > 0)
 				{

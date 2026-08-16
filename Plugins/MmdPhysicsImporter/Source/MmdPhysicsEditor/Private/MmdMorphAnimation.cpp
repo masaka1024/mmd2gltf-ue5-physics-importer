@@ -2,6 +2,7 @@
 
 #include "MmdMorphAnimation.h"
 
+#include "Animation/AnimCurveMetadata.h"
 #include "Animation/AnimData/IAnimationDataController.h"
 #include "Animation/AnimSequence.h"
 #include "Animation/MorphTarget.h"
@@ -187,6 +188,23 @@ FMmdMorphAnimResult FMmdMorphAnimation::ApplyMorphCurves(USkeletalMesh* Mesh, UA
 
 	USkeleton* Skeleton = Anim->GetSkeleton();
 
+	// ★スケルトンへ「これはモーフを動かすカーブだ」と登録する。
+	//   FBX インポータ (SkeletalMeshEdit.cpp) と Interchange の AnimSequenceFactory が
+	//   同じことをしている。これが立っていないと、UE はカーブを読みはするが
+	//   モーフには繋がない (詳しくは MmdMorphAnimation.h の注記)。
+	//
+	//   カーブを足したときだけでなく、**既にカーブがある場合も**呼ぶ。
+	//   登録はスケルトン側にあり、アニメーションを保存しても付いてこないので、
+	//   前回の登録がスケルトン未保存のまま失われている可能性があるため。
+	const auto EnsureMorphMetaData = [Skeleton, &Result](const FName& CurveName)
+	{
+		if (Skeleton == nullptr) return;
+		const FCurveMetaData* Meta = Skeleton->GetCurveMetaData(CurveName);
+		if (Meta != nullptr && Meta->Type.bMorphtarget) return;   // 既に立っている
+		Skeleton->AccumulateCurveMetaData(CurveName, /*bMaterialSet=*/false, /*bMorphtargetSet=*/true);
+		Result.MorphMetaDataSet++;
+	};
+
 	// 既にあるカーブ名を一度だけ集めておく (トラックごとに問い合わせない)。
 	TArray<FName> ExistingCurves;
 	UAnimationBlueprintLibrary::GetAnimationCurveNames(Anim, ERawCurveTrackTypes::RCT_Float, ExistingCurves);
@@ -218,9 +236,11 @@ FMmdMorphAnimResult FMmdMorphAnimation::ApplyMorphCurves(USkeletalMesh* Mesh, UA
 			continue;
 		}
 
-		// 既にカーブがあるなら触らない (UE 側が直った場合に二重で入れないため)。
+		// 既にカーブがあるならキーは触らない (UE 側が直った場合に二重で入れないため)。
+		// ただしスケルトンへの登録だけは確かめる (上の EnsureMorphMetaData の注記を参照)。
 		if (ExistingCurves.Contains(CurveName))
 		{
+			EnsureMorphMetaData(CurveName);
 			Result.SkippedExisting++;
 			continue;
 		}
@@ -241,13 +261,7 @@ FMmdMorphAnimResult FMmdMorphAnimation::ApplyMorphCurves(USkeletalMesh* Mesh, UA
 			/*bMetaDataCurve=*/false);
 		UAnimationBlueprintLibrary::AddFloatCurveKeys(Anim, CurveName, KeyTimes, KeyValues);
 
-		// ★スケルトン側に「これはモーフを動かすカーブだ」と登録する。
-		//   FBX インポータ (SkeletalMeshEdit.cpp) と Interchange の AnimSequenceFactory が
-		//   同じことをしている。これが無いと、カーブはあるのにモーフが動かないことがある。
-		if (Skeleton != nullptr)
-		{
-			Skeleton->AccumulateCurveMetaData(CurveName, /*bMaterialSet=*/false, /*bMorphtargetSet=*/true);
-		}
+		EnsureMorphMetaData(CurveName);
 
 		Result.CurvesAdded++;
 		Result.KeysAdded += KeyTimes.Num();
@@ -256,9 +270,9 @@ FMmdMorphAnimResult FMmdMorphAnimation::ApplyMorphCurves(USkeletalMesh* Mesh, UA
 	Result.bSuccess = true;
 	Result.Message = FString::Printf(
 		TEXT("モーフのアニメーションを追加しました: %d / %d トラック (キー %d / ")
-		TEXT("モーフターゲット無しで除外 %d / 既存のまま %d)"),
+		TEXT("モーフターゲット無しで除外 %d / 既存のまま %d / スケルトンへ登録 %d)"),
 		Result.CurvesAdded, Result.TotalTracks, Result.KeysAdded,
-		Result.SkippedNoMorphTarget, Result.SkippedExisting);
+		Result.SkippedNoMorphTarget, Result.SkippedExisting, Result.MorphMetaDataSet);
 	UE_LOG(LogMmdPhysics, Log, TEXT("[MmdPhysics] %s"), *Result.Message);
 	return Result;
 }

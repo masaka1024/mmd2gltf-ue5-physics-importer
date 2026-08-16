@@ -394,9 +394,31 @@ UE がモーフ名を読む場所（`mesh.extras.targetNames`）にも 45 件が
 3. `meshes[i].extras.targetNames` でモーフ名を得る（**UE がモーフ名を読むのと同じ場所**）
 4. サンプラの `input`（時刻）/ `output`（ウェイト）を `ReadFloatAccessor` で読む
 5. トラックごとに `UAnimationBlueprintLibrary::AddCurve` + `AddFloatCurveKeys`
-6. `Skeleton->AccumulateCurveMetaData(name, false, true)` で「モーフを動かすカーブ」と登録する
-   （FBX インポータの `SkeletalMeshEdit.cpp` と Interchange の `InterchangeAnimSequenceFactory.cpp`
-   が同じことをしている。これが無いとカーブはあるのにモーフが動かないことがある）
+6. `Skeleton->AccumulateCurveMetaData(name, false, true)` で「モーフを動かすカーブ」と登録し、
+   **スケルトンのアセットも保存する**（FBX インポータの `SkeletalMeshEdit.cpp` と Interchange の
+   `InterchangeAnimSequenceFactory.cpp` が同じことをしている）
+
+### カーブを足すだけでは動かない（スケルトンの curve metadata と、その保存）
+
+UE 5.5 は「そのカーブがモーフを動かすか」を**カーブ名では判断しません**。
+`FBoneContainer::CacheRequiredAnimCurves`（`BoneContainer.cpp`）が
+**スケルトン**（または `SkeletalMesh` の `UAnimCurveMetaData`）のメタデータだけを見て
+`ECurveElementFlags::MorphTarget` を組み立て、`FAnimInstanceProxy::UpdateCurvesToEvaluationContext`
+（`AnimInstanceProxy.cpp`）はそのフラグが立ったカーブしか `MorphTargetCurve` に入れません。
+名前がモーフターゲットと完全に一致していても、フラグが無ければ何も起きません。
+
+ここに 2 つ落とし穴があります。どちらも**「体は踊るのに顔だけ動かない」**という壊れ方をします。
+
+- **登録先はスケルトンで、アニメーションを保存しても付いてこない。**
+  `AccumulateCurveMetaData` は `MarkPackageDirty()` するだけなので、スケルトンのアセットを
+  明示的に保存しないとエディタを閉じた時点で登録が消え、カーブだけが残ります。
+  【3】は `MorphMetaDataSet > 0` のときスケルトンも `SavePackage` します
+- **既存カーブを飛ばすときも登録は確かめる。** キーの二重追加は避けたいが、
+  登録が失われている状態からの復旧は「カーブが既にある」ケースそのものです。
+  カーブの有無とメタデータの有無は独立に判定します（`EnsureMorphMetaData`）
+
+自動テストは名前の一致だけでなく、**スケルトンに登録されているか**と
+**スケルトンが未保存のまま残っていないか**まで見ます（前者だけ見ていたので取りこぼしました）。
 
 注意している点:
 

@@ -209,9 +209,20 @@ FMmdActorResult FMmdActorBuilder::BuildActor(USkeletalMesh* Mesh, const FString&
 					UE_LOG(LogMmdPhysics, Warning,
 						TEXT("[MmdPhysics] 表情モーフのアニメーションを補えませんでした: %s"), *Morph.Message);
 				}
-				else if (Morph.CurvesAdded > 0)
+				else
 				{
-					SaveAsset(Result.Animation);
+					if (Morph.CurvesAdded > 0)
+					{
+						SaveAsset(Result.Animation);
+					}
+					// ★スケルトンも保存する。「このカーブはモーフを動かす」という登録は
+					//   スケルトン側にあり、アニメーションを保存しても付いてこない。
+					//   保存しないとエディタを開き直した時点で登録が消え、カーブはあるのに
+					//   顔だけ動かない状態になる (詳しくは MmdMorphAnimation.h の注記)。
+					if (Morph.MorphMetaDataSet > 0)
+					{
+						SaveAsset(Result.Animation->GetSkeleton());
+					}
 				}
 			}
 			if (Result.AnimationCandidates > 1)

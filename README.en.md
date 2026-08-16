@@ -93,7 +93,10 @@ Interchange drops glTF morph (`weights`) animation, so the `AnimSequence` ends u
 though the `.glb` carries the keys. Step 3 therefore reads those keys straight out of the `.glb` and
 adds the curves whose names match the mesh's morph targets. It uses the `.glb` you picked in the
 importer window, so **select both the mesh and the `.glb`** before running it. Curves that already
-exist are left alone, so rebuilding never duplicates them.
+exist are left alone, so rebuilding never duplicates them. Step 3 also registers those curves on the
+skeleton as morph-driving curves and **saves the skeleton asset** — UE 5.5 decides what drives a
+morph target from that registration alone, so if it is not saved the face stops moving the next time
+you open the editor even though the curves are still there.
 
 Outline thickness is the component's `Outline Width Scale` (default 0.15); changing it takes effect
 immediately. Materials whose PMX `flags` bit4 is not set get no outline, same as MMD. To add one to
@@ -116,7 +119,7 @@ and logs an actionable error if the import convention does not match.
 | Overlapping hair strands saturate | Check that the `SoftPass` component is present — without it the second pass is never drawn |
 | Translucent materials are drawn in the wrong order | Order follows the material slot order. Fix the material order in the model, or set `TranslucencySortPriority` on the skeletal mesh component in the level (that only orders the whole model against other actors) |
 | The motion does not play | Are you placing the `BP_<MeshName>` from step 3? A bare skeletal mesh gets no animation assigned. If the output log says `アニメーション なし`, either the `.glb` has no motion baked in (converted without the exporter's `--vmd`), or no `AnimSequence` is bound to that skeleton |
-| The face (expressions) does not move | Did you run step 3 **with the `.glb` also selected**? Morph curves are read straight from the `.glb`, because UE's import drops them. If the output log says `表情モーフ 0 本`, either the motion has no morph keys or the morph names do not match the mesh's morph targets |
+| The face (expressions) does not move | Did you run step 3 **with the `.glb` also selected**? Morph curves are read straight from the `.glb`, because UE's import drops them. `表情モーフ 0 本` with a non-zero `既存のまま N` still means the curves are there; in that case check `スケルトンへ登録 N` in the same log (UE only drives morphs from curves registered on the skeleton — step 3 registers them and saves the skeleton). `表情モーフ 0 本` with `既存のまま 0` means the motion has no morph keys, or the morph names do not match the mesh's morph targets |
 | No outlines appear | Are you placing the `BP_<MeshName>` from step 3? A bare skeletal mesh has no outline component. If it is there and still nothing shows, raise `Outline Width Scale`. Materials whose PMX `flags` bit4 is not set correctly get none |
 | All outlines are the same color | Check that `EdgeColor` is set on the body material instances — the component reads the color from there |
 | Outlines lag behind when the expression changes | Check that `MmdOutlineComponent` is updating every frame (`Draw Outline` enabled, component Tick not disabled) |
@@ -197,6 +200,10 @@ Derivation and measured validation: [docs/coordinate_transform.md](docs/coordina
   `AnimSequence` with 54 bone tracks and 0 curves. Step 3 therefore reads those keys out of the
   `.glb` itself and adds the curves, which is why **step 3 needs the `.glb`**. If UE ever fixes
   this, existing curves are left untouched, so the workaround simply becomes a no-op.
+  Adding the curves is not enough on its own: `FBoneContainer` builds the
+  `ECurveElementFlags::MorphTarget` flag purely from the skeleton's curve metadata, and
+  `FAnimInstanceProxy` only feeds flagged curves to morph targets. Step 3 therefore registers the
+  metadata (for curves that already exist too) and saves the skeleton asset.
   Separately, UV morphs (PMX morph type 3; 8 of them on IA) have no equivalent in UE morph targets,
   so they are neither imported nor given a curve.
 - `sphereMode: 3` (sub-texture), `ambient` and `specular` are not supported

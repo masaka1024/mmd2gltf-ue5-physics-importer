@@ -20,6 +20,18 @@
 // ★UE 側が直ったら丸ごと消せるように、1 ファイルに閉じてある。
 //   判定は「そのカーブが既にあるか」だけなので、直った UE では
 //   既存カーブを上書きせず何もしない (下の bSkipExisting を参照)。
+//
+// ★カーブを足すだけでは足りない。**スケルトン側の curve metadata**
+//   (`FCurveMetaData::Type.bMorphtarget`) が立っていないと、UE はそのカーブを
+//   モーフに繋がない。UE 5.5 は `FBoneContainer` を組むときに
+//   スケルトン (または SkeletalMesh の UAnimCurveMetaData) のメタデータだけを見て
+//   `ECurveElementFlags::MorphTarget` を決め、`FAnimInstanceProxy` は
+//   そのフラグが立ったカーブしか `MorphTargetCurve` へ入れない
+//   (BoneContainer.cpp の CacheRequiredAnimCurves / AnimInstanceProxy.cpp の
+//   UpdateCurvesToEvaluationContext)。
+//   したがって登録は**カーブを足したときだけでなく、既にカーブがある場合も**必要で、
+//   さらに**スケルトンのアセットを保存**しないとエディタを開き直した時点で消える
+//   (「体は踊るのに顔だけ動かない」という壊れ方をする)。
 // ===========================================================================
 
 #pragma once
@@ -46,6 +58,12 @@ struct MMDPHYSICSEDITOR_API FMmdMorphAnimResult
 	int32 SkippedNoMorphTarget = 0;
 	/** 既にカーブがあったため触らなかった数 (UE 側が直った場合など)。 */
 	int32 SkippedExisting = 0;
+	/**
+	 * スケルトンへ「モーフを動かすカーブ」として登録し直した数。
+	 * ★0 でないなら **スケルトンのアセットを保存しないと次のセッションで効かない**。
+	 *   呼び出し側 (FMmdActorBuilder) が保存する。
+	 */
+	int32 MorphMetaDataSet = 0;
 	FString Message;
 };
 
