@@ -103,6 +103,35 @@ git clone --depth 1 https://github.com/masaka1024/mmd2gltf-unity-physics-importe
 ★`FixedTimeStep` は 1/60 のまま触らないこと。細刻みが欲しいときは `SubSteps` を増やします
 （移植元 `MmdPhysicsBehaviour.cs` の注記と同じ方針）。
 
+### 積み残した時間は捨てる（移植元との意図的な差）
+
+`StepSimulation` は 1 回の呼び出しで走らせる内部ステップを `MaxStepsPerCall`（8）で打ち切りますが、
+**超過分の時間は `_accumulator` に残さず捨てます**。
+
+捨てないと、シェーダーコンパイルやアセットロードで数秒止まったぶんが借金として積まれ、
+以後しばらく毎フレーム 8 ステップ = **実時間の 8 倍速**で回り続けます。髪とスカートが暴れて
+体に潜り込み、**貫入したまま釣り合って戻らなくなります**。起動時の再整合
+（`PoseResetDelayFrames`）は最初の数フレームで終わっているので、復帰もしません。
+「アクターを作った直後に一度崩れて、そのまま直らない」という壊れ方の正体がこれでした。
+
+落ちたフレームの時間を取り戻す価値は無いので、実時間へ復帰させる側を採ります
+（いわゆる spiral of death 対策で、固定刻みアキュムレータでは標準的な処理です）。
+捨てた時間は診断用に `PhysicsWorld::DiscardedTime` へ積んでいます。
+
+数値パリティ（`MmdPhysics.Core.GlbParity`）には影響しません。パリティテストは固定 dt で
+300 フレーム回すので、積み残しが上限に達すること自体がありません。
+
+### 走行中に物理を初期状態へ戻す
+
+貫入平衡に落ちたときの復帰手段として、Blueprint から
+**`Reset MMD Physics`**（`UMmdPhysicsFunctionLibrary::ResetMmdPhysics`）を呼べます。
+スケルタルメッシュコンポーネントを渡すと、Post-Process AnimBP（と通常の AnimGraph）の中の
+`FAnimNode_MmdPhysics` をすべて探して `RequestPoseReset()` を立てます。
+再整合は次の評価から `PoseResetDelayFrames` 回ぶん行います（アニメーションが新しい姿勢を
+適用した後の骨格に合わせる必要があるため、1 フレームでは足りません）。
+
+モーションの切り替え直後・ループの折り返し・テレポート直後に呼ぶのが想定用途です。
+
 ## 半透明の扱い（lilToon → UE マテリアル）
 
 移植元 `Editor/MmdPhysicsImporterWindow.cs` の lilToon 設定を UE へ写した対応表です。

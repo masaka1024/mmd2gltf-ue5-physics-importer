@@ -271,4 +271,39 @@ bool FMmdPhysicsCollisionMaskTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// 固定刻みアキュムレータの積み残し。
+//
+// シェーダーコンパイルやアセットロードで数秒止まると、その時間がまるごと積まれる。
+// 上限を掛けずに持ち越すと、以後しばらく毎フレーム上限いっぱいのステップ
+// (= 実時間の 8 倍速) で回り続け、髪とスカートが暴れて体に潜り込む。
+// 落ちた時間を取り戻す価値は無いので、上限を超えた分は捨てる。
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMmdPhysicsAccumulatorTest, "MmdPhysics.Core.Accumulator",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMmdPhysicsAccumulatorTest::RunTest(const FString& Parameters)
+{
+	PhysicsWorld World;
+	World.FixedTimeStep = 1.0f / 60.0f;
+
+	// 通常のフレーム: 1 ステップずつ進み、何も捨てない。
+	World.StepSimulation(1.0f / 60.0f);
+	TestEqual(TEXT("通常フレームは 1 ステップ"), World.LastStepsRun, 1);
+	TestEqual(TEXT("通常フレームでは何も捨てない"), World.DiscardedTime, 0.0f);
+
+	// 5 秒のハング。上限までしか走らず、超過分は捨てる。
+	World.StepSimulation(5.0f);
+	TestEqual(TEXT("1 回の呼び出しは上限ステップまで"),
+		World.LastStepsRun, PhysicsWorld::MaxStepsPerCall);
+	TestTrue(FString::Printf(TEXT("超過分を捨てている (%.3f 秒)"), World.DiscardedTime),
+		World.DiscardedTime > 4.8f);
+
+	// ★ここが本題。次のフレームは借金を引きずらず、実時間へ戻っていること。
+	World.StepSimulation(1.0f / 60.0f);
+	TestEqual(TEXT("次のフレームは 1 ステップに戻る (借金を持ち越さない)"), World.LastStepsRun, 1);
+
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

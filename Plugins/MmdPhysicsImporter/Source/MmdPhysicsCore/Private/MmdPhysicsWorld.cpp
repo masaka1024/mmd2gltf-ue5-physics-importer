@@ -63,12 +63,25 @@ namespace MmdPhysics
 	{
 		_accumulator += DeltaTime;
 
+		// ★積み残しは捨てる (上限 MaxStepsPerCall * FixedTimeStep)。
+		//   クランプしないと、シェーダーコンパイルやアセットロードで数秒止まった分が
+		//   借金として残り、以後しばらく毎フレーム上限いっぱい = 実時間の 8 倍速で回る。
+		//   髪とスカートが暴れて体に潜り込み、貫入平衡に落ちて戻らなくなる
+		//   (起動時の再整合は最初の数フレームで終わっているので復帰もしない)。
+		//   落ちたフレームの時間を取り戻す価値は無い。捨てて実時間へ復帰させる。
+		const float MaxBacklog = MaxStepsPerCall * FixedTimeStep;
+		if (_accumulator > MaxBacklog)
+		{
+			DiscardedTime += _accumulator - MaxBacklog;
+			_accumulator = MaxBacklog;
+		}
+
 		// このフレームで走らせる内部ステップ数を先に確定する。
 		// キネマティック(ボーン)目標の補間は「フレーム全体の総サブステップ数」を分母に等分する。
 		// こうしないと、InternalStep を複数回呼ぶ場合に各内部ステップが個別に目標へ到達してしまい、
 		// 最初の内部ステップで目標へジャンプ→残り停止、という誤補間になる (30fps入力を細分できない)。
 		int32 stepsToRun = 0;
-		{ float rem = _accumulator; while (rem >= FixedTimeStep && stepsToRun < 8) { rem -= FixedTimeStep; stepsToRun++; } }
+		{ float rem = _accumulator; while (rem >= FixedTimeStep && stepsToRun < MaxStepsPerCall) { rem -= FixedTimeStep; stepsToRun++; } }
 		LastStepsRun = stepsToRun; // 診断用 (タイミングログ)
 		if (stepsToRun == 0) return;
 

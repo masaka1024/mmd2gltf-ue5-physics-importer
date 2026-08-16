@@ -106,8 +106,15 @@ namespace MmdPhysics
 		// 既定 false=従来順(ビット不変)。ON=Bullet 準拠。
 		bool SolveJointsFirst = false;
 
+		// 1 回の StepSimulation で走らせる内部ステップ数の上限。
+		// ★これを超えた分の時間は**捨てる**(次回へ持ち越さない)。MmdPhysicsWorld.cpp の注記を参照。
+		static constexpr int32 MaxStepsPerCall = 8;
+
 		// 診断用: 直近の StepSimulation で実行された内部ステップ数 (0=蓄積のみ)。挙動に影響しない。
 		int32 LastStepsRun = 0;
+
+		// 診断用: 上限を超えて捨てた時間の合計 (秒)。0 でなければどこかで長く止まっている。
+		float DiscardedTime = 0.0f;
 
 		// --- 位相別プロファイル (既定OFF=計時呼び出しゼロ=挙動/性能ともビット不変) ---
 		// ON にすると SubStep 内の各位相の累積時間(ms)と回数を積む。最適化の効果測定用。
