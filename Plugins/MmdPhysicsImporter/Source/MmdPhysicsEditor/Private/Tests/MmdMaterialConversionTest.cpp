@@ -418,6 +418,36 @@ bool FMmdMaterialConversionTest::RunTest(const FString& Parameters)
 			}
 		}
 
+		// --- α を使う材質のベーステクスチャが BC7 になっているか ---
+		//
+		// ★BC3 (TC_Default) の α は 4x4 ブロックごとに 8 段階へ量子化されるので、
+		//   髪の房の輪郭にある中間値が階段状に潰れる。BC7 は**同じ 8bpp のまま**これを改善する。
+		//   変換側は UpgradeAlphaTextureToBC7 で上げている。
+		// ★上げる条件と同じ条件でだけ見る:
+		//     ・その材質が α を使う (ブレンド or アルファテスト)
+		//     ・そのテクスチャが中間の α を持つ (HasSoftAlpha)。0/255 だけのプリベイク版は
+		//       BC3 の端点で正確に出るので上げる意味が無く、α が全部 255 のものは
+		//       DXT1 (4bpp) で焼かれているため上げるとメモリが倍になる
+		//   利用者が意図して TC_Default 以外にしたものは変換が触らないので、ここでも見ない。
+		{
+			UTexture* BaseTex = nullptr;
+			MI->GetTextureParameterValue(FMaterialParameterInfo(TEXT("BaseColorTex")), BaseTex);
+			UTexture2D* Base2D = Cast<UTexture2D>(BaseTex);
+			const bool bUsesAlpha = bIsTranslucent || Plan.AlphaCutoff >= 0.0f;
+
+			if (Base2D != nullptr && bUsesAlpha
+				&& !Base2D->GetPathName().StartsWith(TEXT("/Engine/"))
+				&& FMmdMaterialConversion::HasSoftAlpha(Base2D)
+				&& Base2D->CompressionSettings == TC_Default)
+			{
+				AddError(FString::Printf(
+					TEXT("スロット '%s' は α を使う (%s) のに、BaseColorTex ('%s') が BC3 のまま。")
+					TEXT("髪の縁が階段状に潰れます。"),
+					*SlotName, bIsTranslucent ? TEXT("ブレンド") : TEXT("アルファテスト"),
+					*Base2D->GetName()));
+			}
+		}
+
 		// --- origTexture: BaseColorTex が無加工版に差し替わっているか ---
 		if (Plan.bUseOrigTexture)
 		{

@@ -86,6 +86,48 @@ namespace
 		return UPackage::SavePackage(Package, nullptr, *FileName, Args);
 	}
 
+	/**
+	 * α を実際に使う材質のベーステクスチャを BC7 へ寄せる。上げたら true。
+	 *
+	 * ★狙いは**髪の縁の階段**。BC3 (TC_Default) の α は 4x4 ブロックごとに 2 端点＋補間の
+	 *   8 段階へ量子化されるため、房の輪郭にある中間値が階段状に潰れる。BC7 は α を
+	 *   ブロック内でもっと細かく持てる。IA での実測 (1024x1024・同一画角で画素比較) は
+	 *   変化した画素 71.28% / 平均差 3.27 / 最大差 175 で、**変化は髪の房の輪郭に沿った
+	 *   細い筋だけ**に集中していた (顔・肌・服はほぼ無変化)。
+	 *
+	 * ★条件を 2 つとも満たすときだけ上げる:
+	 *     1. その材質が α を使う (アルファテスト or ブレンド) こと
+	 *        … α を見ない材質では、縁の階段はそもそも絵に出ない
+	 *     2. そのテクスチャが**中間の α を持つ** (HasSoftAlpha) こと
+	 *        … 0/255 だけのプリベイク版は BC3 の端点で正確に出るので上げる意味が無く、
+	 *          α が全部 255 のテクスチャは UE が DXT1 (4bpp) で焼くため、
+	 *          BC7 (8bpp) に上げるとメモリが**倍**になる。中間値があるときだけ得がある
+	 *          (このとき UE は元から DXT5 = 8bpp なのでサイズは変わらない)
+	 *
+	 * ★TC_Default のものだけ触る。利用者が意図して別の設定にしたもの (TC_EditorIcon など) は
+	 *   そのまま残す (IsColorTexture の注記と同じ方針)。2 回目の変換では既に TC_BC7 なので
+	 *   何も起きない。
+	 */
+	bool UpgradeAlphaTextureToBC7(UTexture2D* Tex)
+	{
+		if (Tex == nullptr) return false;
+		if (Tex->CompressionSettings != TC_Default) return false;
+		// エンジン既定の白テクスチャ (パラメータ未設定) は触らない。
+		if (Tex->GetPathName().StartsWith(TEXT("/Engine/"))) return false;
+		if (!FMmdMaterialConversion::HasSoftAlpha(Tex)) return false;
+
+		Tex->CompressionSettings = TC_BC7;
+		Tex->PostEditChange();          // ここで再圧縮が走る
+		Tex->MarkPackageDirty();
+		SavePackageOfAsset(Tex);        // 保存しないと次に開いたとき元に戻る
+
+		UE_LOG(LogMmdPhysics, Log,
+			TEXT("[MmdPhysics] テクスチャ '%s' を BC7 にしました ")
+			TEXT("(α を使う材質のベーステクスチャ。BC3 と同じ 8bpp のまま、縁の階段が減ります)。"),
+			*Tex->GetName());
+		return true;
+	}
+
 	template <typename T>
 	T* MakeNode(UMaterial* Mat, int32 X, int32 Y)
 	{
@@ -374,6 +416,34 @@ namespace
 UTexture2D* FMmdMaterialConversion::FindImportedTextureByImageName(const FString& ImageName, const FString& PackagePath)
 {
 	return FindImportedTexture(ImageName, PackagePath);
+}
+
+bool FMmdMaterialConversion::HasSoftAlpha(UTexture2D* Tex)
+{
+	if (Tex == nullptr) return false;
+
+	// ★ここも MeasureUvAlpha と同じく「取り込んだ元画像」(Source) から読む。
+	//   実行時のミップは BC 圧縮済みでアルファが量子化されているうえ、
+	//   UTexture2D::HasAlphaChannel() は実行時データを見るため、
+	//   コマンドレットのようにテクスチャがまだビルドされていない場面では常に false を返す
+	//   (実測: -nullrhi の自動テストでは全テクスチャが「α 無し」に見えた)。
+	FTextureSource& Src = Tex->Source;
+	if (!Src.IsValid()) return false;
+	if (Src.GetFormat() != TSF_BGRA8) return false;   // 誤判定するより触らないほうが安全
+
+	IImageWrapperModule& ImageWrapper = FModuleManager::LoadModuleChecked<IImageWrapperModule>("ImageWrapper");
+	TArray64<uint8> Mip;
+	if (!Src.GetMipData(Mip, 0, &ImageWrapper)) return false;
+
+	const int64 NumPixels = static_cast<int64>(Src.GetSizeX()) * Src.GetSizeY();
+	if (NumPixels <= 0 || Mip.Num() < NumPixels * 4) return false;
+
+	for (int64 i = 0; i < NumPixels; i++)
+	{
+		const uint8 A = Mip[i * 4 + 3];   // BGRA
+		if (A > 0 && A < 255) return true;
+	}
+	return false;
 }
 
 bool FMmdMaterialConversion::IsColorTexture(const UTexture2D* Tex)
@@ -1256,6 +1326,19 @@ FMmdMaterialResult FMmdMaterialConversion::ConvertMaterials(USkeletalMesh* Mesh,
 		if (BaseTexture != nullptr)
 		{
 			UMaterialEditingLibrary::SetMaterialInstanceTextureParameterValue(MI, TEXT("BaseColorTex"), BaseTexture);
+
+			// ★α を実際に使う材質のベーステクスチャは BC7 へ寄せる (理由は
+			//   UpgradeAlphaTextureToBC7 の注記)。「α を使う」は次のどちらか:
+			//     ・ブレンドする (Translucent)
+			//     ・アルファテストで切る (AlphaCutoff >= 0。2 パス目を持つ材質もここに入る。
+			//       PlanMaterial が bSoftPass のとき AlphaCutoff = KSubpassCutoff を置くため)
+			//   ★半透明マスターを用意できずに Masked へ落ちた場合は、しきい値も入らないので
+			//     α を見ない。Plan ではなく**実際に使う組み合わせ**で判断する。
+			const bool bUsesAlpha = bTranslucent || Plan.AlphaCutoff >= 0.0f;
+			if (bUsesAlpha && UpgradeAlphaTextureToBC7(BaseTexture))
+			{
+				Result.Bc7Upgraded++;
+			}
 		}
 
 		// ★拡散色 (移植元 462〜463 行の _Color)。テクスチャ無しの材質はここにしか色が無い。
@@ -1458,10 +1541,10 @@ FMmdMaterialResult FMmdMaterialConversion::ConvertMaterials(USkeletalMesh* Mesh,
 	Result.Message = FString::Printf(
 		TEXT("マテリアルを変換しました: %d / %d スロット ")
 		TEXT("(半透明 %d〈うち昇格 %d・貼り付け材質 %d〉/ 無加工テクスチャ %d / GLB から抽出 %d / ")
-		TEXT("色に直した %d / 近似トゥーン %d / マスター: %s%s)"),
+		TEXT("色に直した %d / BC7 に上げた %d / 近似トゥーン %d / マスター: %s%s)"),
 		Result.Converted, Result.Total, Result.Translucent, Result.Promoted, Result.Overlay,
 		Result.OrigTextureApplied, Result.ExtractedTextures, Result.RetypedTextures,
-		Result.ApproxToon, KMasterName,
+		Result.Bc7Upgraded, Result.ApproxToon, KMasterName,
 		Result.Translucent > 0 ? TEXT(" + M_MmdToonTranslucent") : TEXT(""));
 	UE_LOG(LogMmdPhysics, Log, TEXT("[MmdPhysics] %s"), *Result.Message);
 	return Result;

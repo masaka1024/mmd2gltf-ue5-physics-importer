@@ -160,6 +160,13 @@ struct MMDPHYSICSEDITOR_API FMmdMaterialResult
 	 *   詳しくは MmdMaterialConversion.cpp の EnsureColorTexture の注記。
 	 */
 	int32 RetypedTextures = 0;
+	/**
+	 * α を使う材質のベーステクスチャを BC7 にした枚数。
+	 * ★BC3 の α は 4x4 ブロックで 8 段階へ量子化され、髪の縁が階段状に潰れる。
+	 *   BC7 は同じ 8bpp のままこれを改善する。詳しくは MmdMaterialConversion.cpp の
+	 *   UpgradeAlphaTextureToBC7 の注記。2 回目の変換では 0 になる (既に BC7 のため)。
+	 */
+	int32 Bc7Upgraded = 0;
 	/** 輪郭線フラグ (PMX flags bit4) が立っている材質の数。 */
 	int32 WithOutline = 0;
 	/**
@@ -225,6 +232,24 @@ public:
 	 * 変換 (EnsureColorTexture) と検証 (MmdMaterialConversionTest) が同じ物差しを使うための公開。
 	 */
 	static bool IsColorTexture(const UTexture2D* Tex);
+
+	/**
+	 * ソース画像に**中間の α** (0 < α < 255 の画素) があるか。
+	 *
+	 * ★「BC7 にする価値があるか」の判定に使う。BC3 の α は 4x4 ブロックごとに
+	 *   2 端点＋補間の 8 段階へ量子化されるので、中間値を持つ縁が階段状に潰れる。
+	 *   逆に:
+	 *     ・α が 0/255 だけ (プリベイク版) … 端点で正確に出るので BC3 で足りる
+	 *     ・α が全部 255                  … UE は DXT1 (4bpp) で焼く。BC7 に上げると**倍**になる
+	 *
+	 * ★見るのは実行時のミップではなくソース画像。実行時側は BC 圧縮でαが量子化済みなうえ、
+	 *   UTexture2D::HasAlphaChannel() はテクスチャがまだビルドされていない場面
+	 *   (コマンドレットからの自動テストなど) で常に false を返す。
+	 *
+	 * 変換 (UpgradeAlphaTextureToBC7) と検証 (MmdMaterialConversionTest) が同じ物差しを
+	 * 使うための公開。
+	 */
+	static bool HasSoftAlpha(UTexture2D* Tex);
 
 	/**
 	 * マスターマテリアルを用意する (無ければ生成する)。
