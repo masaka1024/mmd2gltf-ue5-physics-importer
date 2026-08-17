@@ -204,6 +204,21 @@ FMmdWireResult FMmdPhysicsWiring::WirePhysics(USkeletalMesh* Mesh, const FString
 		{
 			Schema->TryCreateConnection(PhysOutPin, RootInPin);
 		}
+
+		// ★繋がったことを必ず確かめる。ピンが見つからないときも TryCreateConnection が
+		//   false を返したときも、ここまでは黙って素通りしてしまう。繋がっていない
+		//   AnimGraph は **コンパイルだけ通る** ので、「物理もアニメーションも効かない
+		//   Post-Process AnimBP ができあがり、エラーも警告も出ない」という壊れ方をする。
+		//   ★空間が違うぶんスキーマが変換ノードを挟むので、相手ピンと直結しているかではなく
+		//     **リンクが 1 本でも張られたか** で判定する (直結を期待すると誤検知する)。
+		if (PhysInPin == nullptr || PhysInPin->LinkedTo.Num() == 0
+			|| RootInPin == nullptr || RootInPin->LinkedTo.Num() == 0)
+		{
+			Result.Message = TEXT("AnimGraph のノードを繋げませんでした ")
+				TEXT("(Input Pose → MMD Physics → Output Pose)。")
+				TEXT("UE のバージョン差でピン名が変わった可能性があります。");
+			return Result;
+		}
 	}
 
 	// --- 設定を書き込む ---
