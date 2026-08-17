@@ -1221,7 +1221,7 @@ FMmdMaterialResult FMmdMaterialConversion::ConvertMaterials(USkeletalMesh* Mesh,
 		{
 			// ★共有トゥーンの解決は 3 段構え。順番を崩さないこと。
 			//   1) 名前 toonXX でプロジェクト全体を探す (最優先)。
-			//      本家の画像を取り込んでいるプロジェクトでは、以前と完全に同じ結果になる。
+			//      MMD 付属の画像を取り込んでいるプロジェクトでは、以前と完全に同じ結果になる。
 			//   2) 前回の変換で作った近似ランプ T_MmdToonApproxXX。
 			//   3) それも無ければ近似ランプを生成する (MmdToonRamp.h)。
 			//   ※ 2) と 3) は EnsureApproxToonTexture が「あれば再利用、無ければ生成」で
@@ -1243,7 +1243,7 @@ FMmdMaterialResult FMmdMaterialConversion::ConvertMaterials(USkeletalMesh* Mesh,
 						UE_LOG(LogMmdPhysics, Log,
 							TEXT("[MmdPhysics] '%s' がプロジェクトに見つからないため、")
 							TEXT("近似ランプ '%s' を生成して使用しました。")
-							TEXT("本家の色にしたい場合は %s をプロジェクトに取り込んでください ")
+							TEXT("MMD 側の色にしたい場合は %s をプロジェクトに取り込んでください ")
 							TEXT("(置き場所は自由。名前で自動検出します)。"),
 							*SharedName, *FMmdToonRamp::AssetNameFor(Info->ToonShared), *SharedName);
 					}
