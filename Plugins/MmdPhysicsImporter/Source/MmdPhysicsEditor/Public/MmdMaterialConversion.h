@@ -209,6 +209,23 @@ public:
 	static UTexture2D* FindImportedTextureByImageName(const FString& ImageName, const FString& PackagePath);
 
 	/**
+	 * そのテクスチャを「色」として読めるか (sRGB が入っていて、RGB が圧縮で落ちていないか)。
+	 *
+	 * ★判定は **TC_Default かどうかではない**。要るのは次の 2 つだけ:
+	 *     ・sRGB=true          … 8bit の色値としてガンマが掛かって読まれること
+	 *     ・RGB が残る圧縮形式  … TC_Normalmap (BC5) は青が無い、TC_Grayscale/TC_Alpha は色が無い
+	 *   TC_BC7 (高品質 RGBA) や TC_EditorIcon (無圧縮 RGBA) は色として全く問題無いので、
+	 *   ここで弾いても取り込み直しても得が無い。特に近似トゥーンランプ
+	 *   (FMmdToonRamp::EnsureApproxToonTexture が作る T_MmdToonApproxNN) は
+	 *   **意図的に** TC_EditorIcon で作ってある — BC 圧縮すると 4x4 ブロックで色が混ざり
+	 *   境界のぼかし幅が指定どおりにならないため (理由は MmdToonRamp.h)。
+	 *   TC_Default を要求するとこれを「誤り」と判定してしまう。
+	 *
+	 * 変換 (EnsureColorTexture) と検証 (MmdMaterialConversionTest) が同じ物差しを使うための公開。
+	 */
+	static bool IsColorTexture(const UTexture2D* Tex);
+
+	/**
 	 * マスターマテリアルを用意する (無ければ生成する)。
 	 * @param PackagePath 生成先 (例 "/Game/IA")
 	 * @param Variant     Masked → "M_MmdToon" / Translucent → "M_MmdToonTranslucent"

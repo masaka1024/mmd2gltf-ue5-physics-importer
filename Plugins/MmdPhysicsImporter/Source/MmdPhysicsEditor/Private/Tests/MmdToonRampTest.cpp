@@ -8,6 +8,7 @@
 #include "Misc/AutomationTest.h"
 #include "HAL/PlatformMisc.h"
 #include "Engine/Texture2D.h"
+#include "MmdMaterialConversion.h"
 #include "MmdToonRamp.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -221,6 +222,12 @@ bool FMmdToonRampAssetTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Bilinear"), (int32)Tex->Filter, (int32)TF_Bilinear);
 	// ★BC 圧縮すると 4x4 ブロックで色が混ざり、ぼかし幅が指定どおりにならない。
 	TestEqual(TEXT("無圧縮 (TC_EditorIcon)"), (int32)Tex->CompressionSettings, (int32)TC_EditorIcon);
+	// ★この設定が「色として読めない」と判定されないこと。
+	//   ConvertMaterials 側の検査が TC_Default を要求していたため、共有トゥーンを
+	//   取り込んでいない環境 (= 近似ランプが実際に使われる環境) でだけ、この正しい設定が
+	//   誤りと判定されていた。ここは共有トゥーンの有無に関係なく走るので、再発を止められる。
+	TestTrue(TEXT("色として読める設定になっている (IsColorTexture)"),
+		FMmdMaterialConversion::IsColorTexture(Tex));
 
 	// --- 画素 (アセットの中身) ---
 	FTextureSource& Src = Tex->Source;

@@ -229,11 +229,16 @@ namespace
 		 *
 		 *   MMD の材質が指すテクスチャ (base / toon / sphere) は**すべて色**なので、
 		 *   ここで一律に色として取り込み直す。推定が当たることは無い。
+		 *
+		 * ★直すのは**色として読めないものだけ** (IsColorTexture)。TC_Default 以外を一律に
+		 *   直そうとすると、色として何も問題の無い TC_BC7 (UE 5.5 の取り込み既定が
+		 *   こちらになる環境がある) を DXT へ落として品質を下げ、アセットを無駄に
+		 *   保存し直すことになる。
 		 */
 		bool EnsureColorTexture(UTexture2D* Tex)
 		{
 			if (Tex == nullptr) return false;
-			if (Tex->CompressionSettings == TC_Default && Tex->SRGB) return false;
+			if (FMmdMaterialConversion::IsColorTexture(Tex)) return false;
 
 			UE_LOG(LogMmdPhysics, Warning,
 				TEXT("[MmdPhysics] テクスチャ '%s' が色以外 (圧縮 %d / sRGB %d) で取り込まれていたので")
@@ -368,6 +373,26 @@ namespace
 UTexture2D* FMmdMaterialConversion::FindImportedTextureByImageName(const FString& ImageName, const FString& PackagePath)
 {
 	return FindImportedTexture(ImageName, PackagePath);
+}
+
+bool FMmdMaterialConversion::IsColorTexture(const UTexture2D* Tex)
+{
+	if (Tex == nullptr) return false;
+	// sRGB が落ちていると、8bit の色値がリニア値として読まれてガンマが外れる。
+	if (!Tex->SRGB) return false;
+
+	// RGB がそのまま残る圧縮形式。ここに無いものは色が欠ける:
+	//   TC_Normalmap (BC5) は青が無い / TC_Grayscale・TC_Alpha・TC_Masks は色が無いか sRGB を持たない。
+	switch (static_cast<int32>(Tex->CompressionSettings))
+	{
+	case TC_Default:                 // DXT1/5 (BC1/3)
+	case TC_BC7:                     // 高品質 RGBA。UE 5.5 の取り込み既定がこちらになる環境がある
+	case TC_EditorIcon:              // 無圧縮 RGBA (近似トゥーンランプがこれ。MmdToonRamp.h 参照)
+	case TC_VectorDisplacementmap:   // 同じく無圧縮 RGBA8
+		return true;
+	default:
+		return false;
+	}
 }
 
 bool FMmdMaterialConversion::MeasureUvAlpha(USkeletalMesh* Mesh, int32 SlotIndex, UTexture2D* Texture,

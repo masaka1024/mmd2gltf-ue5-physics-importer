@@ -678,9 +678,26 @@ MMD の髪テクスチャは青緑〜紫が主で、接空間法線マップの�
 
 材質が指すテクスチャ（base / toon / sphere）は **すべて色**で、法線マップであることはありません。
 そこで `FTextureResolver::EnsureColorTexture` が引き当てた全テクスチャの取り込み設定を検査し、
-色以外になっていたら `TC_Default` / `sRGB=true` に直して保存し直します（直した枚数は
+**色として読めないもの**を `TC_Default` / `sRGB=true` に直して保存し直します（直した枚数は
 変換結果の「色に直した N」に出ます）。この経路は `MmdPhysics.Editor.ConvertMaterials` が
-「MI に入っている全テクスチャが `TC_Default` かつ `sRGB`」であることで検証します。
+同じ判定（`FMmdMaterialConversion::IsColorTexture`）で検証します。
+
+★判定は **「`TC_Default` かどうか」ではありません**。要るのは次の 2 つだけです:
+
+- `sRGB=true` … 8bit の色値としてガンマが掛かって読まれること
+- **RGB が残る圧縮形式** … `TC_Default` / `TC_BC7` / `TC_EditorIcon` / `TC_VectorDisplacementmap`
+
+`TC_Default` を要求すると、色として何の問題も無い設定まで誤りと判定します。実例が 2 つあります:
+
+- **近似トゥーンランプ `T_MmdToonApproxNN` は意図的に無圧縮の `TC_EditorIcon`** です
+  （BC 圧縮すると 4x4 ブロックで色が混ざりぼかし幅が崩れる。`MmdToonRamp.h`）。
+  共有トゥーン `toon01`〜`toon10` を取り込んでいる環境では名前検索が最優先で拾うため
+  近似ランプ経路が発火せず、**この誤判定はランプを実際に使う環境でだけ出ます**
+- **`TC_BC7`（高品質 RGBA・sRGB=on）で取り込まれる環境があります**。これを一律に直すと
+  BC7 → DXT へ品質を落とす向きに焼き直し、アセットを無駄に保存し直すことになります
+
+近似ランプ側の設定が「色として読める」ことは `MmdPhysics.Editor.ToonRampAsset` が見ています
+（共有トゥーンの有無に関係なく走るので、上の穴が再発しません）。
 
 ★取り込み側の設定（Interchange の法線マップ推定を切る）で回避する手もありますが、
 プロジェクト設定に依存させると「設定を変えていない環境では化ける」ことになるため、

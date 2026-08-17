@@ -394,6 +394,11 @@ bool FMmdMaterialConversionTest::RunTest(const FString& Parameters)
 		//   そのまま色として読むと青が 0 になり、青緑の髪が**黄緑**で描かれる
 		//   (Tda式初音ミク・アペンドで実測)。材質が指すテクスチャは全て色なので、
 		//   変換が直しているはず。詳しくは MmdMaterialConversion.cpp の EnsureColorTexture。
+		//
+		// ★見るのは「色として読めるか」(IsColorTexture) であって「TC_Default か」ではない。
+		//   近似トゥーンランプ T_MmdToonApproxNN は**意図的に**無圧縮の TC_EditorIcon で
+		//   作ってあり (BC 圧縮するとぼかし幅が崩れる。MmdToonRamp.h)、TC_BC7 も色としては
+		//   問題無い。TC_Default を要求すると、これら正しい設定を誤りと判定してしまう。
 		for (const TCHAR* TexParam : { TEXT("BaseColorTex"), TEXT("ToonTex"), TEXT("SphereTex") })
 		{
 			UTexture* Tex = nullptr;
@@ -403,7 +408,7 @@ bool FMmdMaterialConversionTest::RunTest(const FString& Parameters)
 			// 既定の白テクスチャ (パラメータ未設定) は対象外。
 			if (Tex2D->GetPathName().StartsWith(TEXT("/Engine/"))) continue;
 
-			if (Tex2D->CompressionSettings != TC_Default || !Tex2D->SRGB)
+			if (!FMmdMaterialConversion::IsColorTexture(Tex2D))
 			{
 				AddError(FString::Printf(
 					TEXT("スロット '%s' の %s ('%s') が色として取り込まれていない ")
