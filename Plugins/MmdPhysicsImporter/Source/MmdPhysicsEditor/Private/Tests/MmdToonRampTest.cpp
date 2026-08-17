@@ -36,6 +36,12 @@ bool FMmdToonRampTest::RunTest(const FString& Parameters)
 		const FMmdToonRampDef& Def = FMmdToonRamp::GetDef(Index);
 		const FString Tag = FString::Printf(TEXT("toon%02d"), Index + 1);
 
+		// ★帯 (ハイライトの筋) を持つランプは、明部→陰部の単調な遷移ではなくなる。
+		//   下の「間にある / 単調 / 平坦」の 3 つは帯の内側では成り立たないので、
+		//   帯の範囲だけ除いて検査する (帯そのものは後段で個別に見る)。
+		const bool bHasBand = Def.BandWidth > 0.0f;
+		const float BandHalf = Def.BandWidth * 0.5f;
+
 		// --- テーブルの値が「ランプとして成立する」範囲にあるか ---
 		// ★ぼかしが端まではみ出すと、最上段/最下段が明部色/陰部色そのものにならない。
 		//   目視調整でうっかり 0.9 のような境界を入れたときにここで落ちる。
@@ -92,6 +98,13 @@ bool FMmdToonRampTest::RunTest(const FString& Parameters)
 				if (Pixels[Y * RampSize + X] != Row) RowVaried++;
 			}
 
+			// 横方向の一様さは帯があっても崩れない (帯は V にしか効かない) ので常に見る。
+			const float V = static_cast<float>(Y) / static_cast<float>(RampSize - 1);
+			if (bHasBand && FMath::Abs(V - Def.BandCenter) < BandHalf)
+			{
+				continue;   // 帯の内側は下の 3 つの対象外
+			}
+
 			// 明部色と陰部色の間に収まっているか (各チャンネル)。
 			auto Between = [](uint8 Value, uint8 A, uint8 B)
 			{
@@ -113,7 +126,6 @@ bool FMmdToonRampTest::RunTest(const FString& Parameters)
 
 			// ★境界位置が指定どおりか: ぼかし幅の外側は明部色/陰部色そのもので、
 			//   変化はすべて [境界-幅/2, 境界+幅/2] の中で起きる。
-			const float V = static_cast<float>(Y) / static_cast<float>(RampSize - 1);
 			if (V <= Def.Boundary - Half && Row != Def.Light) PlateauBroken++;
 			if (V >= Def.Boundary + Half && Row != Def.Shadow) PlateauBroken++;
 		}
@@ -121,6 +133,50 @@ bool FMmdToonRampTest::RunTest(const FString& Parameters)
 		TestEqual(*FString::Printf(TEXT("%s: 全画素が明部色と陰部色の間にある"), *Tag), OutOfRange, 0);
 		TestEqual(*FString::Printf(TEXT("%s: 下へ行くほど陰部色へ寄る"), *Tag), NotMonotonic, 0);
 		TestEqual(*FString::Printf(TEXT("%s: ぼかし幅の外は明部色/陰部色のまま"), *Tag), PlateauBroken, 0);
+
+		// --- 帯 (ハイライトの筋) ---
+		if (bHasBand)
+		{
+			// ★帯と境界の遷移が重なると、どちらの検査も意味を失う。
+			//   重ならないことをモデルの前提として固定しておく。
+			TestTrue(*FString::Printf(TEXT("%s: 帯が上端をはみ出さない"), *Tag),
+				Def.BandCenter - BandHalf > 0.0f);
+			TestTrue(*FString::Printf(TEXT("%s: 帯と境界のぼかしが重ならない"), *Tag),
+				Def.BandCenter + BandHalf < Def.Boundary - Half);
+
+			// 中心でちょうど帯の色になる。
+			const FColor Peak = FMmdToonRamp::Sample(Def, Def.BandCenter);
+			TestEqual(*FString::Printf(TEXT("%s: 帯の中心が帯の色 (R)"), *Tag), (int32)Peak.R, (int32)Def.Band.R);
+			TestEqual(*FString::Printf(TEXT("%s: 帯の中心が帯の色 (G)"), *Tag), (int32)Peak.G, (int32)Def.Band.G);
+			TestEqual(*FString::Printf(TEXT("%s: 帯の中心が帯の色 (B)"), *Tag), (int32)Peak.B, (int32)Def.Band.B);
+
+			// ★帯の外では「帯が無いとき」と 1 ビットも変わらない。
+			//   これが崩れると、帯を足したことが他の V へ漏れている。
+			FMmdToonRampDef NoBand = Def;
+			NoBand.BandWidth = 0.0f;
+			int32 Leaked = 0;
+			for (int32 Y = 0; Y < RampSize; Y++)
+			{
+				const float V = static_cast<float>(Y) / static_cast<float>(RampSize - 1);
+				if (FMath::Abs(V - Def.BandCenter) < BandHalf) continue;
+				if (FMmdToonRamp::Sample(Def, V) != FMmdToonRamp::Sample(NoBand, V)) Leaked++;
+			}
+			TestEqual(*FString::Printf(TEXT("%s: 帯の外へ影響が漏れない"), *Tag), Leaked, 0);
+		}
+	}
+
+	// 帯を持たないランプでは Band* が一切効かない (既定値のまま素通り)。
+	{
+		FMmdToonRampDef Plain;
+		Plain.Light = FColor(255, 255, 255);
+		Plain.Shadow = FColor(100, 100, 100);
+		Plain.Boundary = 0.5f;
+		Plain.Softness = 0.1f;
+		Plain.Band = FColor(255, 0, 0);   // 効いてしまったら赤が出る
+		Plain.BandCenter = 0.25f;
+		Plain.BandWidth = 0.0f;           // 帯なし
+		const FColor At25 = FMmdToonRamp::Sample(Plain, 0.25f);
+		TestEqual(TEXT("BandWidth=0 なら帯の色は出ない"), (int32)At25.R, (int32)At25.G);
 	}
 
 	// 範囲外は toon01 相当 (落とさない)。
