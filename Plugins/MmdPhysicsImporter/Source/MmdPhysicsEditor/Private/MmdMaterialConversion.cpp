@@ -231,9 +231,10 @@ namespace
 		 *   ここで一律に色として取り込み直す。推定が当たることは無い。
 		 *
 		 * ★直すのは**色として読めないものだけ** (IsColorTexture)。TC_Default 以外を一律に
-		 *   直そうとすると、色として何も問題の無い TC_BC7 (UE 5.5 の取り込み既定が
-		 *   こちらになる環境がある) を DXT へ落として品質を下げ、アセットを無駄に
-		 *   保存し直すことになる。
+		 *   直そうとすると、色として何も問題の無い設定まで焼き直してしまう。
+		 *   実例: α の階段 (BC3 の α は 4x4 ブロックで 8 段階に量子化される) を減らすため
+		 *   髪のテクスチャを手で TC_BC7 にしている利用者がいる。BC7 は BC3 と同じ 8bpp で
+		 *   サイズも変わらないのに、これを DXT へ焼き戻すのは**意図した設定を壊す**動作になる。
 		 */
 		bool EnsureColorTexture(UTexture2D* Tex)
 		{
@@ -386,7 +387,7 @@ bool FMmdMaterialConversion::IsColorTexture(const UTexture2D* Tex)
 	switch (static_cast<int32>(Tex->CompressionSettings))
 	{
 	case TC_Default:                 // DXT1/5 (BC1/3)
-	case TC_BC7:                     // 高品質 RGBA。UE 5.5 の取り込み既定がこちらになる環境がある
+	case TC_BC7:                     // 高品質 RGBA。α の階段を減らすため手で選ばれることがある
 	case TC_EditorIcon:              // 無圧縮 RGBA (近似トゥーンランプがこれ。MmdToonRamp.h 参照)
 	case TC_VectorDisplacementmap:   // 同じく無圧縮 RGBA8
 		return true;

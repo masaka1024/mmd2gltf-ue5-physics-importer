@@ -215,7 +215,8 @@ public:
 	 *     ・sRGB=true          … 8bit の色値としてガンマが掛かって読まれること
 	 *     ・RGB が残る圧縮形式  … TC_Normalmap (BC5) は青が無い、TC_Grayscale/TC_Alpha は色が無い
 	 *   TC_BC7 (高品質 RGBA) や TC_EditorIcon (無圧縮 RGBA) は色として全く問題無いので、
-	 *   ここで弾いても取り込み直しても得が無い。特に近似トゥーンランプ
+	 *   ここで弾いても取り込み直しても得が無い (むしろ**利用者が意図して選んだ設定を壊す**。
+	 *   BC7 は α の階段を減らすために手で選ぶことがある)。特に近似トゥーンランプ
 	 *   (FMmdToonRamp::EnsureApproxToonTexture が作る T_MmdToonApproxNN) は
 	 *   **意図的に** TC_EditorIcon で作ってある — BC 圧縮すると 4x4 ブロックで色が混ざり
 	 *   境界のぼかし幅が指定どおりにならないため (理由は MmdToonRamp.h)。
