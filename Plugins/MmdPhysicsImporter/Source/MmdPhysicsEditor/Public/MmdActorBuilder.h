@@ -50,6 +50,13 @@ struct MMDPHYSICSEDITOR_API FMmdActorResult
 	 */
 	int32 MorphCurvesAdded = 0;
 	/**
+	 * 取り込みの時点で名前が化けていて消したカーブ数 (.glb を渡したときだけ)。
+	 * `▲` `∧` `□` のような記号モーフは UE のリグ規則に載らず、Interchange が
+	 * カーブを作れた場合も `_` のような名前へ潰れてどのモーフにも繋がらない。
+	 * 放っておくと残り続けるので消している (MmdMorphAnimation.h の注記を参照)。
+	 */
+	int32 MorphCurvesRemoved = 0;
+	/**
 	 * 参照ポーズへ戻した translation トラック数 (.glb を渡したときだけ)。
 	 * 0 でないなら **その .glb が古い**。修正前のエクスポーターが移動できないボーンへ
 	 * 移動値を焼いていたぶんで、本来は出し直すのが正しい

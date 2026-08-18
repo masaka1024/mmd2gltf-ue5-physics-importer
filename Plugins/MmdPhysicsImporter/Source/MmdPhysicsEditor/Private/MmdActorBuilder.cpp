@@ -226,6 +226,7 @@ FMmdActorResult FMmdActorBuilder::BuildActor(USkeletalMesh* Mesh, const FString&
 				const FMmdMorphAnimResult Morph =
 					FMmdMorphAnimation::ApplyMorphCurves(Mesh, Result.Animation, GlbPath);
 				Result.MorphCurvesAdded = Morph.CurvesAdded;
+				Result.MorphCurvesRemoved = Morph.CurvesRemoved;
 				if (!Morph.bSuccess)
 				{
 					// 致命ではない。ボーンのモーションはそのまま動く。
@@ -234,7 +235,10 @@ FMmdActorResult FMmdActorBuilder::BuildActor(USkeletalMesh* Mesh, const FString&
 				}
 				else
 				{
-					if (Morph.CurvesAdded > 0)
+					// ★足した回だけでなく**消した回も保存が要る**。
+					//   化けたカーブを消しただけの回で保存を飛ばすと、エディタを
+					//   開き直した時点で消したカーブが戻ってくる。
+					if (Morph.CurvesAdded > 0 || Morph.CurvesRemoved > 0)
 					{
 						bAnimDirty = true;
 					}
@@ -311,13 +315,17 @@ FMmdActorResult FMmdActorBuilder::BuildActor(USkeletalMesh* Mesh, const FString&
 	const FString FixNote = Result.TranslationTracksReset > 0
 		? FString::Printf(TEXT(" / 古い .glb の translation を戻した %d 本"), Result.TranslationTracksReset)
 		: FString();
+	// 同じ理由で 0 のときは出さない (化けたカーブが無いのが普通の状態)。
+	const FString RemovedNote = Result.MorphCurvesRemoved > 0
+		? FString::Printf(TEXT(" / 化けたカーブを消した %d 本"), Result.MorphCurvesRemoved)
+		: FString();
 	Result.Message = FString::Printf(
-		TEXT("アクターを生成しました: %s (輪郭線 %s / 毛先パス %s / アニメーション %s / 表情モーフ %d 本%s)"),
+		TEXT("アクターを生成しました: %s (輪郭線 %s / 毛先パス %s / アニメーション %s / 表情モーフ %d 本%s%s)"),
 		*FullPath,
 		Result.bHasOutline ? TEXT("あり") : TEXT("なし"),
 		Result.bHasSoftPass ? TEXT("あり") : TEXT("なし"),
 		Result.Animation != nullptr ? *Result.Animation->GetName() : TEXT("なし"),
-		Result.MorphCurvesAdded, *FixNote);
+		Result.MorphCurvesAdded, *RemovedNote, *FixNote);
 	UE_LOG(LogMmdPhysics, Log, TEXT("[MmdPhysics] %s"), *Result.Message);
 	return Result;
 }

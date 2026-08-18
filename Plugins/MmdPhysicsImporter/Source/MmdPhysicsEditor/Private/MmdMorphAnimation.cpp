@@ -130,6 +130,20 @@ FString FMmdMorphAnimation::MakeRigSafeName(const FString& In)
 	return Out;
 }
 
+TSet<FName> FMmdMorphAnimation::CollectRigMangledNames(const TArray<FString>& MorphNames)
+{
+	TSet<FName> Mangled;
+	for (const FString& Name : MorphNames)
+	{
+		const FString Safe = MakeRigSafeName(Name);
+		// 名前が変わらないモーフは化けようがない。入れると実在のカーブを消す条件に
+		// 当たってしまうので必ず外す。
+		if (Safe == Name) continue;
+		Mangled.Add(FName(*Safe));
+	}
+	return Mangled;
+}
+
 FMmdMorphAnimResult FMmdMorphAnimation::ApplyMorphCurves(USkeletalMesh* Mesh, UAnimSequence* Anim,
 	const FString& GlbPath)
 {
@@ -231,6 +245,10 @@ FMmdMorphAnimResult FMmdMorphAnimation::ApplyMorphCurves(USkeletalMesh* Mesh, UA
 	TArray<FName> ExistingCurves;
 	UAnimationBlueprintLibrary::GetAnimationCurveNames(Anim, ERawCurveTrackTypes::RCT_Float, ExistingCurves);
 
+	// 掃除の対象を決めるのに、追加を始める前の顔ぶれが要る
+	// (ExistingCurves は下のループで足した名前も入っていくため)。
+	const TArray<FName> CurvesBefore = ExistingCurves;
+
 	// ★カーブの追加はブラケットで囲む。
 	//   AddCurve / AddFloatCurveKeys は 1 回ごとにアニメーションデータの変更通知を出し、
 	//   その度に**アニメーション全体の再圧縮**が走る。IA (54 トラック × 7000 フレーム、
@@ -304,14 +322,38 @@ FMmdMorphAnimResult FMmdMorphAnimation::ApplyMorphCurves(USkeletalMesh* Mesh, UA
 		Result.KeysAdded += KeyTimes.Num();
 	}
 
+	// ★取り込みの時点で化けていたカーブを消す。
+	//   条件は 2 つとも揃ったときだけ (詳しくは MmdMorphAnimation.h の注記):
+	//     1. メッシュに同名のモーフターゲットが無い (何も動かさないカーブ)
+	//     2. 名前が「カーブにできないモーフ」のサニタイズ像と一致する (化け方の説明が付く)
+	//   削除もこのブラケットの中で行う。外に出すと 1 本ごとに再圧縮が走る。
+	const TSet<FName> MangledNames = CollectRigMangledNames(TargetNames);
+	for (const FName& CurveName : CurvesBefore)
+	{
+		// 1: モーフに繋がっているカーブは、名前がどうであれ触らない。
+		if (Mesh->FindMorphTarget(CurveName) != nullptr) continue;
+
+		// 2: 説明が付かないものは残す。壊れたカーブを黙って消さないため。
+		if (!MangledNames.Contains(CurveName))
+		{
+			Result.UnmatchedKeptNames.Add(CurveName.ToString());
+			continue;
+		}
+
+		// スケルトンの curve metadata は触らない (他のアセットと共有している)。
+		UAnimationBlueprintLibrary::RemoveCurve(Anim, CurveName, /*bRemoveNameFromSkeleton=*/false);
+		Result.CurvesRemoved++;
+		Result.RemovedNames.Add(CurveName.ToString());
+	}
+
 	Result.bSuccess = true;
 	Result.Message = FString::Printf(
 		TEXT("モーフのアニメーションを追加しました: %d / %d トラック (キー %d / ")
 		TEXT("モーフターゲット無しで除外 %d / 名前がリグに載らず除外 %d / ")
-		TEXT("既存のまま %d / スケルトンへ登録 %d)"),
+		TEXT("既存のまま %d / スケルトンへ登録 %d / 化けた既存カーブを削除 %d)"),
 		Result.CurvesAdded, Result.TotalTracks, Result.KeysAdded,
 		Result.SkippedNoMorphTarget, Result.SkippedUnsafeName,
-		Result.SkippedExisting, Result.MorphMetaDataSet);
+		Result.SkippedExisting, Result.MorphMetaDataSet, Result.CurvesRemoved);
 	UE_LOG(LogMmdPhysics, Log, TEXT("[MmdPhysics] %s"), *Result.Message);
 
 	if (Result.SkippedUnsafeName > 0)
@@ -321,6 +363,24 @@ FMmdMorphAnimResult FMmdMorphAnimation::ApplyMorphCurves(USkeletalMesh* Mesh, UA
 			TEXT("[MmdPhysics] 次のモーフは名前が UE のリグ規則に載らないため飛ばしました ")
 			TEXT("(英数字と _ - . | 以外の記号は使えません): %s"),
 			*FString::Join(Result.UnsafeNames, TEXT(", ")));
+	}
+
+	if (Result.CurvesRemoved > 0)
+	{
+		// 既存のアセットを書き換えるので、何を消したかは必ず残す。
+		UE_LOG(LogMmdPhysics, Warning,
+			TEXT("[MmdPhysics] 取り込みの時点で名前が化けていたカーブを消しました ")
+			TEXT("(どのモーフターゲットにも対応しないため何も動かしません): %s"),
+			*FString::Join(Result.RemovedNames, TEXT(", ")));
+	}
+
+	if (Result.UnmatchedKeptNames.Num() > 0)
+	{
+		// 消す条件の片方しか満たさないもの。こちらで判断できないので残す。
+		UE_LOG(LogMmdPhysics, Warning,
+			TEXT("[MmdPhysics] 次のカーブはモーフターゲットに対応しませんが、")
+			TEXT("記号モーフの化けた名前とも一致しないため残しました: %s"),
+			*FString::Join(Result.UnmatchedKeptNames, TEXT(", ")));
 	}
 	return Result;
 }

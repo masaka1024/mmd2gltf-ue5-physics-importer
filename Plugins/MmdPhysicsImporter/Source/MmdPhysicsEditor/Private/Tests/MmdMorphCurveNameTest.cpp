@@ -71,6 +71,40 @@ bool FMmdMorphCurveNameTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("記号は 1 文字ずつ _ になる"),
 		FMmdMorphAnimation::MakeRigSafeName(TEXT("a▲b")), FString(TEXT("a_b")));
 
+	// --- 化けた既存カーブを見分けられるか (CollectRigMangledNames) ---
+	// ★何を守っているか。
+	//   Interchange が weights を取り込めた .glb では、記号モーフのカーブが
+	//   **化けた名前のまま AnimSequence に残る** (Tda式 V4X の実例:
+	//   `▲` `∧` `□` → `_` / `恐ろしい子！` → `恐ろしい子_`)。
+	//   ApplyMorphCurves はこれを消すが、判定に使えるのはカーブ名だけで、
+	//   化けた名前は既にリグ規則に載っている (MakeRigSafeName を通しても変わらない)。
+	//   そこで**元のモーフ名から化けた姿を作って**突き合わせる。
+	//   ここが壊れると、消せない (BuildActor が Fail し続ける) か、
+	//   実在のモーフのカーブを消す (顔が動かなくなる) かのどちらかになる。
+	{
+		const TArray<FString> MorphNames = {
+			TEXT("▲"), TEXT("∧"), TEXT("□"), TEXT("恐ろしい子！"), TEXT("まばたき"), TEXT("笑い") };
+		const TSet<FName> Mangled = FMmdMorphAnimation::CollectRigMangledNames(MorphNames);
+
+		TestTrue(TEXT("記号モーフの化けた名前 '_' が入る"), Mangled.Contains(FName(TEXT("_"))));
+		TestTrue(TEXT("'恐ろしい子！' の化けた名前が入る"),
+			Mangled.Contains(FName(TEXT("恐ろしい子_"))));
+
+		// ★載る名前を入れてはいけない。入れると、実在のモーフと同じ名前のカーブが
+		//   削除の候補に挙がってしまう。
+		TestFalse(TEXT("載る名前は入らない (まばたき)"), Mangled.Contains(FName(TEXT("まばたき"))));
+		TestFalse(TEXT("載る名前は入らない (笑い)"), Mangled.Contains(FName(TEXT("笑い"))));
+
+		// 3 つの記号は 1 本に潰れるので、6 件入れても像は 2 件。
+		TestEqual(TEXT("潰れたぶんは 1 つにまとまる"), Mangled.Num(), 2);
+
+		// モーフ名が `_` そのものだった場合 (サニタイズで変わらない) は像を作らない。
+		// 化けたカーブと区別が付かなくなるため。
+		const TArray<FString> AlreadySafe = { TEXT("_") };
+		TestFalse(TEXT("元から '_' のモーフは像にしない"),
+			FMmdMorphAnimation::CollectRigMangledNames(AlreadySafe).Contains(FName(TEXT("_"))));
+	}
+
 	// --- 長さの上限 (URigHierarchy::GetMaxNameLength() = 100) ---
 	const FString Long = FString::ChrN(120, TEXT('a'));
 	TestEqual(TEXT("101 文字以上は 100 文字に切られる"),

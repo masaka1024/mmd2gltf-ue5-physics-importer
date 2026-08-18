@@ -9,6 +9,7 @@
 #include "Misc/AutomationTest.h"
 #include "HAL/PlatformMisc.h"
 #include "Animation/AnimCurveMetadata.h"
+#include "Animation/AnimData/IAnimationDataController.h"
 #include "Animation/AnimSequence.h"
 #include "Animation/Skeleton.h"
 #include "AnimationBlueprintLibrary.h"
@@ -19,6 +20,7 @@
 #include "Engine/SkeletalMesh.h"
 #include "Materials/MaterialInterface.h"
 #include "MmdActorBuilder.h"
+#include "MmdMorphAnimation.h"
 #include "MmdOutlineComponent.h"
 #include "MmdSoftPassComponent.h"
 
@@ -110,10 +112,15 @@ bool FMmdActorBuilderTest::RunTest(const FString& Parameters)
 				TArray<FName> Curves;
 				UAnimationBlueprintLibrary::GetAnimationCurveNames(
 					Expected, ERawCurveTrackTypes::RCT_Float, Curves);
-				AddInfo(FString::Printf(TEXT("アニメーションのカーブ: %d 本 (今回追加 %d 本)"),
-					Curves.Num(), R.MorphCurvesAdded));
+				AddInfo(FString::Printf(
+					TEXT("アニメーションのカーブ: %d 本 (今回追加 %d 本 / 化けたカーブを消した %d 本)"),
+					Curves.Num(), R.MorphCurvesAdded, R.MorphCurvesRemoved));
 
 				// カーブ名はメッシュのモーフターゲット名と一致していなければ何も動かない。
+				// ★Interchange が weights を取り込めた .glb では、記号モーフのカーブが
+				//   `_` `ω_` のような化けた名前で入っていることがある。プラグインが
+				//   それを消しているので、消し損ねるとここで捕まる
+				//   (詳しくは MmdMorphAnimation.h の注記)。
 				int32 Unmatched = 0;
 				for (const FName& Name : Curves)
 				{
@@ -168,6 +175,72 @@ bool FMmdActorBuilderTest::RunTest(const FString& Parameters)
 					Expected, ERawCurveTrackTypes::RCT_Float, CurvesAfter);
 				TestEqual(TEXT("作り直してもカーブが増えない"), CurvesAfter.Num(), Curves.Num());
 				TestEqual(TEXT("2 回目は 1 本も追加しない"), Twice.MorphCurvesAdded, 0);
+				// ★1 回目で消しきれていれば 2 回目は消す物が無い。
+				//   (これはメモリ上の状態しか見ていない。保存されたかは下の dirty で見る)
+				TestEqual(TEXT("2 回目は 1 本も消さない"), Twice.MorphCurvesRemoved, 0);
+
+				// ★書き換えたなら保存されていること。カーブを消しただけの回で
+				//   保存を飛ばすと、エディタを開き直した時点で化けたカーブが戻る。
+				if (R.MorphCurvesAdded > 0 || R.MorphCurvesRemoved > 0)
+				{
+					TestFalse(TEXT("アニメーションが未保存のまま残っていない"),
+						Expected->GetOutermost()->IsDirty());
+				}
+
+				// --- 化けた既存カーブの掃除 ---
+				// ★手元のデータではこの経路を踏めない。報告があったのは別環境の
+				//   `/Game/TdaFresh` で、そこでは Interchange が作ったカーブのうち
+				//   3 本が `_` `ω_` `恐ろしい子_` に化けていた。手元の .glb は
+				//   同じ記号モーフを持つのに化けたカーブが入っていない。
+				//   そこで**化けた姿のカーブを 1 本その場で作って**、消えることを見る。
+				//   (作らずに済ませると、消す処理が動くかどうかを一度も確かめられない)
+				//
+				// どの名前が化けるかは .glb 次第なので、直接呼んで教えてもらう
+				// (BuildActor の戻り値には数しか乗っていない)。
+				// 直前に BuildActor が同じことをしたばかりなので、この呼び出しでは何も変わらない。
+				const FMmdMorphAnimResult Probe =
+					FMmdMorphAnimation::ApplyMorphCurves(Mesh, Expected, GlbPath);
+				if (Probe.UnsafeNames.Num() > 0)
+				{
+					const FName Mangled(*FMmdMorphAnimation::MakeRigSafeName(Probe.UnsafeNames[0]));
+					if (Mesh->FindMorphTarget(Mangled) != nullptr)
+					{
+						// 化けた先に実在のモーフがあるモデル。消してはいけない側なので試さない。
+						AddInfo(FString::Printf(
+							TEXT("'%s' は実在のモーフなので掃除の確認は飛ばします。"), *Mangled.ToString()));
+					}
+					else
+					{
+						{
+							// 1 本でも囲まないとアニメーション全体の再圧縮が走る。
+							IAnimationDataController::FScopedBracket Bracket(
+								Expected->GetController(),
+								FText::FromString(TEXT("化けたカーブの掃除を確かめる")),
+								/*bShouldTransact=*/false);
+							UAnimationBlueprintLibrary::AddCurve(Expected, Mangled,
+								ERawCurveTrackTypes::RCT_Float, /*bMetaDataCurve=*/false);
+						}
+
+						const FMmdActorResult Cleanup = FMmdActorBuilder::BuildActor(Mesh, GlbPath);
+						TestEqual(TEXT("化けたカーブを 1 本消す"), Cleanup.MorphCurvesRemoved, 1);
+
+						TArray<FName> CurvesCleaned;
+						UAnimationBlueprintLibrary::GetAnimationCurveNames(
+							Expected, ERawCurveTrackTypes::RCT_Float, CurvesCleaned);
+						TestFalse(FString::Printf(TEXT("'%s' が消えている"), *Mangled.ToString()),
+							CurvesCleaned.Contains(Mangled));
+						// ★実在のモーフのカーブを巻き添えにしていないこと。
+						//   ここが減っていると「顔が動かなくなる」直し方をしている。
+						TestEqual(TEXT("他のカーブは減っていない"), CurvesCleaned.Num(), Curves.Num());
+
+						if (CurvesCleaned.Contains(Mangled))
+						{
+							// 消せなかったときに、テストが作ったカーブを残さない。
+							UAnimationBlueprintLibrary::RemoveCurve(Expected, Mangled);
+							AddError(TEXT("掃除できなかったため、テストが作ったカーブを取り除きました。"));
+						}
+					}
+				}
 			}
 		}
 		else
