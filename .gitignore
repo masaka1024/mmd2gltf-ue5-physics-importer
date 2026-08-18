@@ -27,3 +27,7 @@ bin/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# MMD モデルの実データ。再配布不可なので追跡しない
+# (検証にはローカルの .glb を環境変数 MMD_PARITY_GLB で渡す)。
+*.glb
