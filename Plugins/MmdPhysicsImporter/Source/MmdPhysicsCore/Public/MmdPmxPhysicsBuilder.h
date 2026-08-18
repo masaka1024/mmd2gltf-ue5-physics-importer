@@ -93,9 +93,16 @@ namespace MmdPhysics
 		 *   [Jointロック内部演算] 再現の第一形: 親側ジョイントの相対euler(補正済親フレーム基準)を
 		 *   リミット超過分だけ α で戻す。MMD(補正ON)の超過8-14°は完全clampでないことを示すため中間αを掃引する。
 		 * 順序比較(位置を物理回転で再構成→回転のみclamp)は、呼び出し側で α=0 と α>0 の2回呼びを合成する。
+		 * @param bAlignAllPositions すべての物理ボーンの位置を再構成するか。
+		 *   false (既定) では **mode2 のボーンだけ**を再構成し、mode1 のボーンは
+		 *   剛体の生の姿勢をそのまま返す。書き戻し側 (FAnimNode_MmdPhysics) が
+		 *   mode1 を生の姿勢で書くので、ここで bind 長の鎖を作り直すと
+		 *   「画面に出ている親」と「mode2 の子が基準にした親」が別物になり、
+		 *   鎖の最後の 1 節だけが伸び縮みする (実測: しっぽ１３ が 0.09〜0.65 倍)。
+		 *   true は bAlignBonePositions 相当で、鎖全体を一貫して再構成する。
 		 */
 		TArray<TOptional<RigidTransform>> ComputeAlignedBonePoses(FBoneWorldGetter GetDrivenBoneWorld,
-			float RotClampAlpha = 0.0f);
+			float RotClampAlpha = 0.0f, bool bAlignAllPositions = false);
 
 	private:
 		TSharedPtr<PmxPhysicsModel> _model;   // FK-rest計算用にボーン階層を参照
@@ -120,8 +127,10 @@ namespace MmdPhysics
 		RigidTransform Align(int32 i, int32 Depth, int32 n,
 			const TArray<TOptional<Quat>>& PhysRot,
 			const TMap<RigidBody*, BoneLink>& LinkOf,
+			// ボーンindex -> そのボーンの BoneLink (無ければ null)。mode1/mode2 の判定に使う。
+			const TArray<const BoneLink*>& LinkOfBone,
 			const TMap<int32, Joint*>* ParentJoint,
-			float RotClampAlpha,
+			float RotClampAlpha, bool bAlignAllPositions,
 			TArray<TOptional<RigidTransform>>& World_,
 			FBoneWorldGetter GetDrivenBoneWorld) const;
 	};

@@ -133,6 +133,13 @@ bool FMmdIdleSettleTest::RunTest(const FString& Parameters)
 	B->World.FixedTimeStep = 1.0f / static_cast<float>(FixedHz);
 	B->World.SubSteps = EnvInt(TEXT("MMD_IDLE_SUBSTEPS"), 2);
 	B->World.SolverIterations = EnvInt(TEXT("MMD_IDLE_ITER"), B->World.SolverIterations);
+	// ★ジョイントだけ追加で回す反復 (長い鎖の伝播用)。待機区間への影響をここで見る。
+	B->World.JointVelocityIterations = EnvInt(TEXT("MMD_IDLE_JOINT_ITER"), B->World.JointVelocityIterations);
+	// 位置補正速度の上限 (0 = コア既定の 10 を触らない)。再生時の設定を再現するのに使う。
+	{
+		const FString V = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_IDLE_MAXCORR"));
+		if (!V.IsEmpty()) B->World.JointMaxCorrectionVel = FCString::Atof(*V);
+	}
 	B->World.SolveJointsFirst = EnvInt(TEXT("MMD_IDLE_JOINTS_FIRST"), 0) != 0;
 	B->World.UseSplitImpulse = EnvInt(TEXT("MMD_IDLE_SPLIT"), B->World.UseSplitImpulse ? 1 : 0) != 0;
 	B->World.UseJointSplitImpulse = EnvInt(TEXT("MMD_IDLE_JOINT_SPLIT"), 0) != 0;
@@ -143,8 +150,8 @@ bool FMmdIdleSettleTest::RunTest(const FString& Parameters)
 	if (!GravEnv.IsEmpty()) B->World.Gravity = Vec3(0.0f, -FCString::Atof(*GravEnv), 0.0f);
 
 	const FString Config = FString::Printf(
-		TEXT("fixed=1/%d sub=%d iter=%d jointsFirst=%d split=%d jointSplit=%d"),
-		FixedHz, B->World.SubSteps, B->World.SolverIterations,
+		TEXT("fixed=1/%d sub=%d iter=%d jointIter=%d jointsFirst=%d split=%d jointSplit=%d"),
+		FixedHz, B->World.SubSteps, B->World.SolverIterations, B->World.JointVelocityIterations,
 		B->World.SolveJointsFirst ? 1 : 0, B->World.UseSplitImpulse ? 1 : 0,
 		B->World.UseJointSplitImpulse ? 1 : 0);
 

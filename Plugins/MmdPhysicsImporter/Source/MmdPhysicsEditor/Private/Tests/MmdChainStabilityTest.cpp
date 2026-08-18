@@ -30,6 +30,9 @@
 #include "MmdActorBuilder.h"
 #include "MmdGlbPhysicsReader.h"
 #include "MmdPhysicsWiring.h"
+#include "AnimNode_MmdPhysics.h"
+#include "Animation/AnimClassInterface.h"
+#include "Animation/AnimInstance.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -171,6 +174,143 @@ bool FMmdChainStabilityTest::RunTest(const FString& Parameters)
 	// 起動直後は再整合が走るので、1 回回してから測り始める。
 	Step(Dt);
 
+	// ★診断: MMD_CHAIN_TRACE_BONES にボーン名をカンマ区切りで並べると、
+	//   1 秒ごとにそのボーンのワールド位置を出す。「比が伸びた」ときに
+	//   どちらのボーンがどこへ行っているのかを見るための一時的な計測。
+	TArray<int32> TraceBones;
+	TArray<FString> TraceNames;
+	{
+		const FString Env = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_CHAIN_TRACE_BONES"));
+		if (!Env.IsEmpty())
+		{
+			Env.ParseIntoArray(TraceNames, TEXT(","), true);
+			for (FString& N : TraceNames)
+			{
+				N.TrimStartAndEndInline();
+				TraceBones.Add(RefSkel.FindBoneIndex(FName(*N)));
+			}
+		}
+	}
+
+	// ★診断: MMD_CHAIN_TRACE_JOINTS に部分文字列を入れると、名前がそれを含む
+	//   ジョイントについて「両端のアンカーがどれだけ離れたか」と剛体の速度を 1 秒ごとに出す。
+	//   ボーンではなく**剛体そのもの**を見るので、ソルバが破綻しているのか
+	//   書き戻しが壊しているのかを分けられる。
+	const FString TraceJointSub = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_CHAIN_TRACE_JOINTS"));
+	const MmdPhysics::PmxPhysicsBuilder* DiagBuilder = nullptr;
+	FAnimNode_MmdPhysics* DiagNode = nullptr;
+	if (!TraceJointSub.IsEmpty()
+		|| !FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_CHAIN_SOLVER")).IsEmpty()
+		|| !FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_CHAIN_DISABLE_JOINTS")).IsEmpty()
+		|| !FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_CHAIN_TRACE_CONTACTS")).IsEmpty())
+	{
+		UAnimInstance* Post = Comp->GetPostProcessInstance();
+		IAnimClassInterface* AnimClass = Post != nullptr ? IAnimClassInterface::GetFromClass(Post->GetClass()) : nullptr;
+		if (AnimClass != nullptr)
+		{
+			for (const FStructProperty* NodeProperty : AnimClass->GetAnimNodeProperties())
+			{
+				if (NodeProperty == nullptr || NodeProperty->Struct == nullptr) continue;
+				if (!NodeProperty->Struct->IsChildOf(FAnimNode_MmdPhysics::StaticStruct())) continue;
+				FAnimNode_MmdPhysics* Node = NodeProperty->ContainerPtrToValuePtr<FAnimNode_MmdPhysics>(Post);
+				if (Node != nullptr) { DiagNode = Node; DiagBuilder = Node->GetBuilderForDiagnostics(); }
+				if (DiagBuilder != nullptr) break;
+			}
+		}
+		AddInfo(DiagBuilder != nullptr
+			? TEXT("ジョイント診断: 物理ワールドを取得しました。")
+			: TEXT("ジョイント診断: 物理ノードが見つかりません。"));
+	}
+
+	// ★診断の A/B。原因を絞るための一時的な差し替え。
+	//   MMD_CHAIN_MAXCORR        … Joint::MaxCorrectionVel (位置補正速度の上限, PMX単位/秒)
+	//   MMD_CHAIN_DISABLE_JOINTS … 名前がこれを含むジョイントを無効化する
+	{
+		// ★ノードのソルバ設定を差し替える。ApplySolverSettings が毎評価でノード -> ワールドへ
+		//   写すので、ノード側を書けばそのまま効く。
+		//   MMD_CHAIN_SOLVER="iter=20,sub=8,split=0,jointsplit=0,align=1,gravity=0"
+		const FString SolverEnv = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_CHAIN_SOLVER"));
+		if (!SolverEnv.IsEmpty() && DiagNode != nullptr)
+		{
+			TArray<FString> Parts;
+			SolverEnv.ParseIntoArray(Parts, TEXT(","), true);
+			for (const FString& P : Parts)
+			{
+				FString Key, Val;
+				if (!P.Split(TEXT("="), &Key, &Val)) continue;
+				Key.TrimStartAndEndInline(); Val.TrimStartAndEndInline();
+				if (Key == TEXT("iter")) DiagNode->SolverIterations = FCString::Atoi(*Val);
+				else if (Key == TEXT("jointiter")) DiagNode->JointVelocityIterations = FCString::Atoi(*Val);
+				else if (Key == TEXT("maxcorr")) DiagNode->JointMaxCorrectionVel = FCString::Atof(*Val);
+				// ★以下はノードに無い実験ノブ (Joint の static / World の A/B フィールド)。
+				//   ApplySolverSettings は触らないフィールドなので、ここで書けば走行中も保たれる。
+				else if (Key == TEXT("levermode")) MmdPhysics::Joint::LinearLeverMode = FCString::Atoi(*Val);
+				else if (Key == TEXT("mixedaxes")) MmdPhysics::Joint::AngularMixedAxes = FCString::Atoi(*Val) != 0;
+				else if (Key == TEXT("jointwarm") && DiagBuilder != nullptr)
+					const_cast<MmdPhysics::PmxPhysicsBuilder*>(DiagBuilder)->World.UseJointWarmStart = FCString::Atoi(*Val) != 0;
+				else if (Key == TEXT("jointwarmang") && DiagBuilder != nullptr)
+					const_cast<MmdPhysics::PmxPhysicsBuilder*>(DiagBuilder)->World.UseJointWarmStartAngular = FCString::Atoi(*Val) != 0;
+				else if (Key == TEXT("jointsfirst") && DiagBuilder != nullptr)
+					const_cast<MmdPhysics::PmxPhysicsBuilder*>(DiagBuilder)->World.SolveJointsFirst = FCString::Atoi(*Val) != 0;
+				else if (Key == TEXT("sub")) DiagNode->SubSteps = FCString::Atoi(*Val);
+				else if (Key == TEXT("split")) DiagNode->bUseSplitImpulse = FCString::Atoi(*Val) != 0;
+				else if (Key == TEXT("jointsplit")) DiagNode->bUseJointSplitImpulse = FCString::Atoi(*Val) != 0;
+				else if (Key == TEXT("align")) DiagNode->bAlignBonePositions = FCString::Atoi(*Val) != 0;
+				else if (Key == TEXT("merge")) DiagNode->bEnableBoneMergeMode = FCString::Atoi(*Val) != 0;
+				else if (Key == TEXT("gravity")) DiagNode->Gravity = FCString::Atof(*Val);
+				else if (Key == TEXT("fixed")) DiagNode->FixedTimeStep = 1.0f / FMath::Max(1.0f, FCString::Atof(*Val));
+			}
+			AddInfo(FString::Printf(
+				TEXT("A/B ソルバ: iter=%d jointiter=%d sub=%d fixed=1/%.0f split=%d jointsplit=%d align=%d merge=%d gravity=%g"),
+				DiagNode->SolverIterations, DiagNode->JointVelocityIterations, DiagNode->SubSteps, 1.0f / DiagNode->FixedTimeStep,
+				DiagNode->bUseSplitImpulse ? 1 : 0, DiagNode->bUseJointSplitImpulse ? 1 : 0,
+				DiagNode->bAlignBonePositions ? 1 : 0, DiagNode->bEnableBoneMergeMode ? 1 : 0,
+				DiagNode->Gravity));
+		}
+
+		const FString MaxCorrEnv = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_CHAIN_MAXCORR"));
+		if (!MaxCorrEnv.IsEmpty())
+		{
+			// ★World が毎ステップ static へ写すので、ノード側の値を書き換える。
+			if (DiagNode != nullptr) DiagNode->JointMaxCorrectionVel = FCString::Atof(*MaxCorrEnv);
+			AddInfo(FString::Printf(TEXT("A/B: JointMaxCorrectionVel = %s"), *MaxCorrEnv));
+		}
+		const FString DisableSub = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_CHAIN_DISABLE_JOINTS"));
+		if (!DisableSub.IsEmpty() && DiagBuilder != nullptr)
+		{
+			int32 Killed = 0;
+			// 診断のためだけに外す。通常経路では触らない。
+			MmdPhysics::PmxPhysicsBuilder* Mutable = const_cast<MmdPhysics::PmxPhysicsBuilder*>(DiagBuilder);
+			for (const TSharedPtr<MmdPhysics::Joint>& J : Mutable->World.Joints)
+			{
+				if (!J.IsValid() || !J->Name.Contains(DisableSub)) continue;
+				J->BodyA = nullptr;   // Prepare/ApplySprings がここで打ち切る
+				J->BodyB = nullptr;
+				Killed++;
+			}
+			AddInfo(FString::Printf(TEXT("A/B: '%s' を含むジョイントを %d 本 無効化"), *DisableSub, Killed));
+		}
+	}
+
+	// ★診断: MMD_CHAIN_TRACE_CONTACTS に部分文字列を入れると、
+	//   その名前を含む剛体の接触 (相手 / 距離 / 法線インパルス) を 1 秒ごとに出す。
+	const FString TraceContactSub = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_CHAIN_TRACE_CONTACTS"));
+	TArray<MmdPhysics::FMmdDebugContact> ContactSink;
+	if (!TraceContactSub.IsEmpty() && DiagBuilder != nullptr)
+	{
+		const_cast<MmdPhysics::PmxPhysicsBuilder*>(DiagBuilder)->World.DebugContacts = &ContactSink;
+		AddInfo(TEXT("接触診断: フックを付けました。"));
+	}
+	// PMX 単位 -> cm。
+	const double ToCm = UnitScale * 100.0;
+
+	// 診断の出力間隔 (フレーム)。既定 30 = 1 秒ごと。
+	int32 TraceEvery = 30;
+	{
+		const FString E = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_CHAIN_TRACE_EVERY"));
+		if (!E.IsEmpty()) TraceEvery = FMath::Max(1, FCString::Atoi(*E));
+	}
+
 	// 各ボーンについて、参照ポーズ長に対する比の最大と最小を追う。
 	//
 	// ★伸びだけでなく**縮み**も見ること。
@@ -182,7 +322,68 @@ bool FMmdChainStabilityTest::RunTest(const FString& Parameters)
 	MinRatio.Init(1.0, Chain.Num());
 	for (int32 s = 0; s < Steps; s++)
 	{
+		ContactSink.Reset();
 		Step(Dt);
+		if (!TraceContactSub.IsEmpty() && (s % TraceEvery) == 0)
+		{
+			// 同じ接触が毎サブステップ積まれるので、相手ごとに最大の法線インパルスだけ残す。
+			TMap<FString, TPair<float, float>> Worst;   // 相手 -> (最大 Ni, その時の距離)
+			for (const MmdPhysics::FMmdDebugContact& C : ContactSink)
+			{
+				const bool bA = C.A.Contains(TraceContactSub);
+				const bool bB = C.B.Contains(TraceContactSub);
+				if (!bA && !bB) continue;
+				const FString Key = FString::Printf(TEXT("%s <-> %s"), *C.A, *C.B);
+				TPair<float, float>& W = Worst.FindOrAdd(Key, TPair<float, float>(0.0f, 0.0f));
+				if (FMath::Abs(C.Ni) > FMath::Abs(W.Key)) { W.Key = C.Ni; W.Value = C.Dist; }
+			}
+			AddInfo(FString::Printf(TEXT("  === t=%.1fs '%s' の接触 %d 組 ==="),
+				s * Dt, *TraceContactSub, Worst.Num()));
+			Worst.ValueSort([](const TPair<float, float>& X, const TPair<float, float>& Y)
+			{
+				return FMath::Abs(X.Key) > FMath::Abs(Y.Key);
+			});
+			int32 Shown = 0;
+			for (const TPair<FString, TPair<float, float>>& KV : Worst)
+			{
+				if (Shown++ >= 8) break;
+				AddInfo(FString::Printf(TEXT("      %-34s 法線力積 %9.4f / 距離 %8.4f (%.2f cm)"),
+					*KV.Key, KV.Value.Key, KV.Value.Value, KV.Value.Value * ToCm));
+			}
+		}
+		if (TraceBones.Num() > 0 && (s % TraceEvery) == 0)
+		{
+			FString Line = FString::Printf(TEXT("  t=%5.1fs"), s * Dt);
+			for (int32 t = 0; t < TraceBones.Num(); t++)
+			{
+				if (TraceBones[t] == INDEX_NONE)
+				{
+					Line += FString::Printf(TEXT(" | %s=(見つからない)"), *TraceNames[t]);
+					continue;
+				}
+				const FVector P = Comp->GetBoneTransform(TraceBones[t], FTransform::Identity).GetLocation();
+				Line += FString::Printf(TEXT(" | %s=(%.1f,%.1f,%.1f)"), *TraceNames[t], P.X, P.Y, P.Z);
+			}
+			AddInfo(Line);
+		}
+		if (DiagBuilder != nullptr && (s % TraceEvery) == 0)
+		{
+			AddInfo(FString::Printf(TEXT("  --- t=%.1fs 剛体側 (接触 %d 件) ---"),
+				s * Dt, DiagBuilder->World.DebugContactCount));
+			for (const TSharedPtr<MmdPhysics::Joint>& J : DiagBuilder->World.Joints)
+			{
+				if (!J.IsValid() || !J->Name.Contains(TraceJointSub)) continue;
+				if (J->BodyA == nullptr || J->BodyB == nullptr) continue;
+				const MmdPhysics::RigidTransform WA = J->BodyA->WorldTransform * J->FrameInA;
+				const MmdPhysics::RigidTransform WB = J->BodyB->WorldTransform * J->FrameInB;
+				const double Sep = (WB.Origin - WA.Origin).Length() * ToCm;
+				AddInfo(FString::Printf(
+					TEXT("    %-10s アンカー差 %8.2f cm | A '%s' 速度 %7.2f | B '%s' 速度 %7.2f cm/s"),
+					*J->Name, Sep,
+					*J->BodyA->Name, J->BodyA->LinearVelocity.Length() * ToCm,
+					*J->BodyB->Name, J->BodyB->LinearVelocity.Length() * ToCm));
+			}
+		}
 		for (int32 c = 0; c < Chain.Num(); c++)
 		{
 			const FVector A = Comp->GetBoneTransform(Chain[c].Bone, FTransform::Identity).GetLocation();

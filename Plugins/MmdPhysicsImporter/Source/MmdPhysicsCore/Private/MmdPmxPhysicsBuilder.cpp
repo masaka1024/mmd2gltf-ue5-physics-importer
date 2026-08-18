@@ -145,8 +145,9 @@ namespace MmdPhysics
 	RigidTransform PmxPhysicsBuilder::Align(int32 i, int32 Depth, int32 n,
 		const TArray<TOptional<Quat>>& PhysRot,
 		const TMap<RigidBody*, BoneLink>& LinkOf,
+		const TArray<const BoneLink*>& LinkOfBone,
 		const TMap<int32, Joint*>* ParentJoint,
-		float RotClampAlpha,
+		float RotClampAlpha, bool bAlignAllPositions,
 		TArray<TOptional<RigidTransform>>& World_,
 		FBoneWorldGetter GetDrivenBoneWorld) const
 	{
@@ -162,12 +163,27 @@ namespace MmdPhysics
 			else if (p < 0 || p >= n) res = RigidTransform(Quat::Identity, _model->BonePositions[i]);
 			else
 			{
-				const RigidTransform pw = Align(p, Depth + 1, n, PhysRot, LinkOf, ParentJoint, RotClampAlpha, World_, GetDrivenBoneWorld);
+				const RigidTransform pw = Align(p, Depth + 1, n, PhysRot, LinkOf, LinkOfBone, ParentJoint, RotClampAlpha, bAlignAllPositions, World_, GetDrivenBoneWorld);
 				res = RigidTransform(pw.Rotation, pw.Rotation * (_model->BonePositions[i] - _model->BonePositions[p]) + pw.Origin);
 			}
 		}
 		else
 		{
+			// ★mode1 (物理演算) のボーンは、書き戻し側が**剛体の生の姿勢をそのまま書く**。
+			//   ここで bind 長の鎖を作り直すと、画面に出る親と、mode2 の子が基準にした親が
+			//   別物になり、鎖の最後の 1 節だけが伸び縮みする
+			//   (実測: しっぽ１〜１２=mode1 の先の しっぽ１３=mode2 が 0.09〜0.65 倍)。
+			//   MMD の [物理演算+Bone位置合わせ] は「親ボーンの**実際の**現在姿勢」を基準にするので、
+			//   親として返すのも生の姿勢でなければならない。
+			//   bAlignAllPositions が立っているときだけ、鎖全体を一貫して再構成する。
+			const BoneLink* const MyLink = LinkOfBone.IsValidIndex(i) ? LinkOfBone[i] : nullptr;
+			const bool bMerge = MyLink != nullptr && MyLink->Mode == EPhysicsMode::DynamicBoneMerge;
+			if (!bAlignAllPositions && !bMerge && MyLink != nullptr && MyLink->Body != nullptr)
+			{
+				World_[i] = MyLink->Body->WorldTransform * MyLink->BodyOffsetFromBone.Inverse();
+				return World_[i].GetValue();
+			}
+
 			// 物理: 回転 = 物理 (RotClampAlpha>0 なら親側ジョイントのリミットへ α で戻す)。
 			//        位置 = 親(補正済)から再構成。親無しはバインド位置。
 			Quat rot = PhysRot[i].GetValue();
@@ -179,7 +195,7 @@ namespace MmdPhysics
 				const BoneLink& aLink = LinkOf[pj->BodyA];
 				RigidTransform aBonePose;
 				if (aLink.BoneIndex >= 0 && aLink.BoneIndex < n)
-					aBonePose = Align(aLink.BoneIndex, Depth + 1, n, PhysRot, LinkOf, ParentJoint, RotClampAlpha, World_, GetDrivenBoneWorld);
+					aBonePose = Align(aLink.BoneIndex, Depth + 1, n, PhysRot, LinkOf, LinkOfBone, ParentJoint, RotClampAlpha, bAlignAllPositions, World_, GetDrivenBoneWorld);
 				else
 					aBonePose = pj->BodyA->WorldTransform * aLink.BodyOffsetFromBone.Inverse();
 				const Quat qA = ((aBonePose * aLink.BodyOffsetFromBone).Rotation * pj->FrameInA.Rotation).Normalized();
@@ -203,7 +219,7 @@ namespace MmdPhysics
 			if (p < 0 || p >= n) res = RigidTransform(rot, _model->BonePositions[i]);
 			else
 			{
-				const RigidTransform pw = Align(p, Depth + 1, n, PhysRot, LinkOf, ParentJoint, RotClampAlpha, World_, GetDrivenBoneWorld);
+				const RigidTransform pw = Align(p, Depth + 1, n, PhysRot, LinkOf, LinkOfBone, ParentJoint, RotClampAlpha, bAlignAllPositions, World_, GetDrivenBoneWorld);
 				res = RigidTransform(rot, pw.Rotation * (_model->BonePositions[i] - _model->BonePositions[p]) + pw.Origin);
 			}
 		}
@@ -212,16 +228,24 @@ namespace MmdPhysics
 	}
 
 	TArray<TOptional<RigidTransform>> PmxPhysicsBuilder::ComputeAlignedBonePoses(
-		FBoneWorldGetter GetDrivenBoneWorld, float RotClampAlpha)
+		FBoneWorldGetter GetDrivenBoneWorld, float RotClampAlpha, bool bAlignAllPositions)
 	{
 		const int32 n = _model->BoneNames.Num();
 		TArray<TOptional<Quat>> physRot; physRot.SetNum(n); // 物理ボーンの復元回転 (位置は捨てる)
 		TMap<RigidBody*, BoneLink> linkOf;
+		// ボーンindex -> BoneLink。mode1 と mode2 で位置の出どころが違うので Align 側で要る。
+		TArray<const BoneLink*> linkOfBone; linkOfBone.Init(nullptr, n);
 		for (const BoneLink& link : BoneLinks)
 		{
 			if (link.Body != nullptr) linkOf.Add(link.Body, link);
 			if (link.BoneIndex >= 0 && link.BoneIndex < n && link.Mode != EPhysicsMode::BoneFollow)
+			{
 				physRot[link.BoneIndex] = (link.Body->WorldTransform * link.BodyOffsetFromBone.Inverse()).Rotation;
+				// ★同じボーンに複数の剛体が付くことがある (例: 腰パーツ親_1/_2/_3)。
+				//   最後に見つけたものが残る。physRot も直上で同じように上書きしているので、
+				//   回転と位置が別の剛体から来ることはない。
+				linkOfBone[link.BoneIndex] = &link;
+			}
 		}
 		// 物理ボーン -> 親側ジョイント (BodyB=自分の剛体)。clamp 用。
 		TMap<int32, Joint*> parentJointMap;
@@ -250,7 +274,7 @@ namespace MmdPhysics
 		world.SetNum(n);
 		for (int32 i = 0; i < n; i++)
 		{
-			if (!world[i].IsSet()) Align(i, 0, n, physRot, linkOf, parentJoint, RotClampAlpha, world, GetDrivenBoneWorld);
+			if (!world[i].IsSet()) Align(i, 0, n, physRot, linkOf, linkOfBone, parentJoint, RotClampAlpha, bAlignAllPositions, world, GetDrivenBoneWorld);
 		}
 		return world;
 	}

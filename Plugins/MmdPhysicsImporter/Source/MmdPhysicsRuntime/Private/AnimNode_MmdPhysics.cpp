@@ -110,6 +110,8 @@ void FAnimNode_MmdPhysics::ApplySolverSettings()
 	//   （再読み込みが走らない限り）何も起きない。設定が効かない、という形で静かに壊れる。
 	Builder->World.Gravity = Vec3(0.0f, -Gravity, 0.0f);
 	Builder->World.SolverIterations = FMath::Max(1, SolverIterations);
+	Builder->World.JointVelocityIterations = FMath::Max(1, JointVelocityIterations);
+	Builder->World.JointMaxCorrectionVel = FMath::Max(0.0f, JointMaxCorrectionVel);
 	Builder->World.SubSteps = FMath::Max(1, SubSteps);
 	Builder->World.FixedTimeStep = FMath::Max(1e-4f, FixedTimeStep);
 	Builder->World.UseSplitImpulse = bUseSplitImpulse;
@@ -272,7 +274,35 @@ void FAnimNode_MmdPhysics::EvaluateSkeletalControl_AnyThread(FComponentSpacePose
 		return TOptional<RigidTransform>(FMmdUeSpace::ToMmd(Output.Pose.GetComponentSpaceTransform(Idx), UnitScale));
 	};
 
-	// 起動直後: アニメがフレーム0を適用した後の骨格へ物理を再整合する。
+	// ワープ検出: 駆動剛体のターゲットが 1 フレームで大きく飛んでいたら、
+	// 起動時と同じ再整合を最初からやり直す。アニメのループ境界 (最終フレーム→先頭) や
+	// シークで骨格がテレポートすると、前姿勢との差が kinematic 速度として物理へ入り、
+	// 体のコライダーが音速で鎖を薙ぎ払う (詳しくはヘッダの TeleportResetThreshold の注記)。
+	// MMD もシーク時は物理が暴れるが、破綻を持ち越すより初期化するほうを選ぶ。
+	// ★再整合は必ず**起動時と同じ経路** (countdown を張り直して下の分岐に任せる) を通すこと。
+	//   一発だけ reset して物理を 1 フレーム止める作りを試したら、かえって 371 倍まで
+	//   悪化した (起動時は PoseResetDelayFrames フレーム連続で整合し、物理も止めない)。
+	if (StartupResetCountdown <= 0 && TeleportResetThreshold > 0.0f)
+	{
+		for (const BoneLink& Link : Builder->BoneLinks)
+		{
+			if (Link.Mode != EPhysicsMode::BoneFollow || Link.BoneIndex < 0) continue;
+			const TOptional<RigidTransform> Bw = BoneWorldOrNull(Link.BoneIndex);
+			if (!Bw.IsSet()) continue;
+			const RigidTransform Target = Bw.GetValue() * Link.BodyOffsetFromBone;
+			const float JumpDist = (Target.Origin - Link.Body->KinematicTarget.Origin).Length();
+			if (JumpDist <= TeleportResetThreshold) continue;
+
+			StartupResetCountdown = FMath::Max(1, PoseResetDelayFrames);
+			UE_LOG(LogMmdPhysics, Log,
+				TEXT("[MmdPhysics] 骨格のテレポートを検出したため物理を再整合します ")
+				TEXT("(剛体 '%s' のターゲットが 1 フレームで %.1f cm 移動。ループ境界かシークです)。"),
+				*Link.Body->Name, JumpDist * UnitScale * 100.0f);
+			break;
+		}
+	}
+
+	// 起動直後 (とテレポート直後): アニメが適用された後の骨格へ物理を再整合する。
 	if (StartupResetCountdown > 0)
 	{
 		Builder->ResetBodiesToBonePose(BoneWorldOrNull);
@@ -293,7 +323,11 @@ void FAnimNode_MmdPhysics::EvaluateSkeletalControl_AnyThread(FComponentSpacePose
 	TArray<TOptional<RigidTransform>> Aligned;
 	if (bNeedAligned)
 	{
-		Aligned = Builder->ComputeAlignedBonePoses(BoneWorldOrNull, AlignRotClampAlpha);
+		// ★bAlignBonePositions を渡すこと。渡さないと、下の bUseAligned が false になる
+		//   mode1 のボーンを Align 側が bind 長で作り直してしまい、
+		//   「生の姿勢で書かれた親」と「再構成された親を基準にした mode2 の子」が食い違う
+		//   (詳しくは ComputeAlignedBonePoses の注記)。
+		Aligned = Builder->ComputeAlignedBonePoses(BoneWorldOrNull, AlignRotClampAlpha, bAlignBonePositions);
 	}
 
 	for (const BoneLink& Link : Builder->BoneLinks)

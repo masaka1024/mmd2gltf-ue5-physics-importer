@@ -57,6 +57,52 @@ struct MMDPHYSICSRUNTIME_API FAnimNode_MmdPhysics : public FAnimNode_SkeletalCon
 	int32 SolverIterations = 10;
 
 	/**
+	 * ジョイントだけを追加で回す速度反復の回数。既定 40。
+	 *
+	 * ★揺れ物の長い鎖が伸び続けるのを止めるための値。
+	 *   Gauss-Seidel は 1 反復でジョイント 1 本ぶんしか情報を伝えないので、
+	 *   節数が反復数を超える鎖では根元の拘束が末端まで届かない。届かなかった相対速度が
+	 *   毎サブステップ残り、位置誤差として**単調に溜まる**(戻らないラチェットになる)。
+	 *   実測 (Tda式初音ミク・アペンド Ver1.10 の しっぽ = 13 節、アニメ再生 20 秒):
+	 *     10 (= SolverIterations と同じ = 従来) … しっぽ３ が 220 倍。鎖が真下へ 55cm/秒 で落ち続ける
+	 *     20                                    … 20 秒では収まるが 60 秒で再発 (123 倍)
+	 *     40 (+下の上限 30)                     … 233 秒 (曲の全長) でも 1.20 倍で収まる
+	 *   40 は しっぽ 13 節に対して 3 倍の余裕。もっと長い鎖のモデルが出たら上げる。
+	 *
+	 * ★接触 (SolverIterations) は 10 のまま据え置くこと。接触の反復を増やすと
+	 *   待機区間の揺れが悪化する (IA 実測 8.91cm/1.72cm、既定 7.17/0.96 より悪い)。
+	 *   鎖に要るのはジョイントの伝播だけなので、ここだけ伸ばす。
+	 *
+	 * ★位置補正 (bUseSplitImpulse / Baumgarte) を強めても直らない。
+	 *   位置補正側の反復を 40 回にしても 178 倍のままだった。効くのは速度側だけ。
+	 */
+	UPROPERTY(EditAnywhere, Category = "Solver", meta = (ClampMin = "1"))
+	int32 JointVelocityIterations = 40;
+
+	/**
+	 * ジョイントの位置補正 (Baumgarte) 速度の上限 [PMX単位/秒]。既定 30。
+	 *
+	 * ★上の JointVelocityIterations と**対で**効く。片方だけでは鎖の伸びは止まらない:
+	 *     反復 40 / 上限 10 (従来)  … 120 秒で しっぽ３ が 201 倍
+	 *     反復 10 / 上限 無制限     … 20 秒で 426 倍 (悪化する。速度が収束していないのに
+	 *                                 補正だけ強めると行き過ぎる)
+	 *     反復 40 / 上限 30         … 233 秒 (曲の全長) でも 1.20 倍
+	 *
+	 * ★機構: 速度求解の解き残しが位置誤差として毎サブステップ積もる。誤差が
+	 *   上限 / (Beta * 1/dt) ≒ 0.42 PMX単位 (3.3cm) を超えると補正速度が頭打ちになり、
+	 *   重力が開く速さに追いつけなくなる。以後その誤差は二度と戻らない
+	 *   (ChainStability で最小比が 1.00 のまま最大比だけ伸び続けるのはこのため)。
+	 *
+	 * ★上限は低すぎても高すぎても壊れる。120 秒までは 20 / 30 / 100 / 1e9 が同結果に
+	 *   見えるが、233 秒 (曲の全長) では **100 が しっぽ３ 468 倍で破綻し、30 は 1.20 倍で
+	 *   通る**。強い補正はアンカーの開きに比例した反動も強めるので、
+	 *   「発散を止められる範囲で一番弱い補正」を選ぶこと。30 は本モデル実測での通過値。
+	 */
+	UPROPERTY(EditAnywhere, Category = "Solver", meta = (ClampMin = "0.0"))
+	float JointMaxCorrectionVel = 30.0f;
+
+
+	/**
 	 * 位置補正 (Baumgarte) を擬似速度で解き、実速度に残さない。
 	 *
 	 * ★静止しているはずの場面で揺れ物が揺れ続けるのを抑える。既定 ON。
@@ -134,6 +180,21 @@ struct MMDPHYSICSRUNTIME_API FAnimNode_MmdPhysics : public FAnimNode_SkeletalCon
 	UPROPERTY(EditAnywhere, Category = "Startup", meta = (ClampMin = "0"))
 	int32 PoseResetDelayFrames = 2;
 
+	/**
+	 * ワープ検出のしきい値 [PMX単位]。0 で無効。
+	 *
+	 * 駆動 (mode0) 剛体のターゲットが 1 フレームでこれ以上動いたら「テレポート」とみなし、
+	 * 物理を現在のボーン姿勢へ再整合する。アニメの**ループ境界** (最終フレーム→先頭)、
+	 * シーク、アクターのワープで骨格が一瞬で飛ぶと、前姿勢との差がそのまま kinematic
+	 * 速度になって鎖を薙ぎ払う (実測: 曲の全長 233 秒は通るのに、ループを 1 回またぐ
+	 * 466 秒では しっぽ２ が一過性で 3.25 倍まで伸びた)。
+	 *
+	 * 既定 3 = unitScale 0.08 で 24cm/フレーム (30fps なら 7.2m/s)。ダンス実測の
+	 * 最大剛体速度は ~1m/s なので、通常モーションでは発火しない。
+	 */
+	UPROPERTY(EditAnywhere, Category = "Startup", meta = (ClampMin = "0.0"))
+	float TeleportResetThreshold = 3.0f;
+
 	// --- 検査 ---
 
 	/**
@@ -153,6 +214,14 @@ struct MMDPHYSICSRUNTIME_API FAnimNode_MmdPhysics : public FAnimNode_SkeletalCon
 
 	/** 物理を現在のボーン姿勢へ再整合する (移植元 ResetPhysicsToBones 相当)。 */
 	void RequestPoseReset() { StartupResetCountdown = FMath::Max(1, PoseResetDelayFrames); }
+
+	/**
+	 * 診断専用: 内部の物理ワールドを覗く。
+	 * ★自動テストが「ボーンではなく剛体そのもの」を見るための口。
+	 *   ボーンの書き戻しを通すと、剛体の暴れとボーン合わせの補正が混ざって
+	 *   どちらが壊れているのか分からなくなる。通常の再生経路では使わない。
+	 */
+	const MmdPhysics::PmxPhysicsBuilder* GetBuilderForDiagnostics() const { return Builder.Get(); }
 
 private:
 	TSharedPtr<MmdPhysics::PmxPhysicsModel> Model;

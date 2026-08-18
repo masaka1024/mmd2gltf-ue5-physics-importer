@@ -61,6 +61,10 @@ namespace MmdPhysics
 	// --- 公開ステップ (可変 dt を固定ステップに分割) ---
 	void PhysicsWorld::StepSimulation(float DeltaTime)
 	{
+		// Joint::MaxCorrectionVel は A/B 用の static なので、ワールド側の設定をここで写す。
+		// 0 のときは触らない (= コア既定のまま = 従来とビット不変)。
+		if (JointMaxCorrectionVel > 0.0f) Joint::MaxCorrectionVel = JointMaxCorrectionVel;
+
 		_accumulator += DeltaTime;
 
 		// ★積み残しは捨てる (上限 MaxStepsPerCall * FixedTimeStep)。
@@ -112,6 +116,10 @@ namespace MmdPhysics
 	// Frac: フレーム開始→終端目標の 等分補間割合 (1/TotalSub .. 1)。フレーム全体で連続する。
 	void PhysicsWorld::SubStep(float dt, float Frac)
 	{
+		// ジョイントの求解反復数 (速度側と位置補正側で共通)。接触は SolverIterations のまま。
+		const int32 JointIters = JointVelocityIterations > 0 ? JointVelocityIterations : SolverIterations;
+		const int32 TotalIters = FMath::Max(SolverIterations, JointIters);
+
 		for (int32 i = 0; i < Bodies.Num(); i++)
 		{
 			RigidBody* b = Body(i);
@@ -135,22 +143,30 @@ namespace MmdPhysics
 		WarmStart();
 		if (ProfileEnabled) ProfWarm += ProfTick();
 
-		for (int32 it = 0; it < SolverIterations; it++)
+		// ★ジョイントは接触より多く回せる (JointVelocityIterations)。
+		//   Gauss-Seidel は 1 反復でジョイント 1 本ぶんしか情報を伝えないので、
+		//   節数が反復数を超える鎖ではアンカーの拘束が末端まで届かず、
+		//   届かなかった相対速度が位置誤差として単調に溜まる (詳しくはヘッダの注記)。
+		//   接触の反復数を増やすと待機区間の揺れが悪化するため、増やすのはジョイントだけにする。
+		//   JointIters <= SolverIterations のときは従来と完全に同じ順序・同じ回数になる。
+		for (int32 it = 0; it < TotalIters; it++)
 		{
+			const bool bDoContacts = it < SolverIterations;
+			const bool bDoJoints = it < JointIters;
 			if (SolveJointsFirst)
 			{
 				// Bullet 2.75 同順: ジョイント → 接触 (接触が後勝ち)。
-				for (const TSharedPtr<Joint>& j : Joints) j->SolveVelocity();
+				if (bDoJoints) for (const TSharedPtr<Joint>& j : Joints) j->SolveVelocity();
 				if (ProfileEnabled) ProfSolveJoint += ProfTick();
-				SolveContacts();
+				if (bDoContacts) SolveContacts();
 				if (ProfileEnabled) ProfSolveContact += ProfTick();
 			}
 			else
 			{
 				// 従来順: 接触 → ジョイント (ジョイントが後勝ち)。
-				SolveContacts();
+				if (bDoContacts) SolveContacts();
 				if (ProfileEnabled) ProfSolveContact += ProfTick();
-				for (const TSharedPtr<Joint>& j : Joints) j->SolveVelocity();
+				if (bDoJoints) for (const TSharedPtr<Joint>& j : Joints) j->SolveVelocity();
 				if (ProfileEnabled) ProfSolveJoint += ProfTick();
 			}
 		}
@@ -164,6 +180,11 @@ namespace MmdPhysics
 				Body(i)->PseudoLinearVelocity = Vec3::Zero;
 				Body(i)->PseudoAngularVelocity = Vec3::Zero;
 			}
+			// ★位置補正側の反復は SolverIterations のまま据え置くこと。
+			//   ジョイントだけ JointIters 回に増やすと**悪化する** (実測: 120 秒が
+			//   収まっていたのに しっぽ４ 376 倍へ)。位置補正を強めると行き過ぎるのは
+			//   MaxCorrectionVel を上げたときと同じ傾向で、鎖の破綻は
+			//   「補正が足りない」より「補正が暴れる」側にある。
 			for (int32 it = 0; it < SolverIterations; it++)
 			{
 				if (UseSplitImpulse) SolveSplitImpulse();
