@@ -49,6 +49,13 @@ struct MMDPHYSICSEDITOR_API FMmdActorResult
 	 * ここで .glb から直接読んで補っている (MmdMorphAnimation.h の注記を参照)。
 	 */
 	int32 MorphCurvesAdded = 0;
+	/**
+	 * 参照ポーズへ戻した translation トラック数 (.glb を渡したときだけ)。
+	 * 0 でないなら **その .glb が古い**。修正前のエクスポーターが移動できないボーンへ
+	 * 移動値を焼いていたぶんで、本来は出し直すのが正しい
+	 * (MmdBoneTranslationFix.h の注記を参照)。
+	 */
+	int32 TranslationTracksReset = 0;
 	FString Message;
 };
 

@@ -15,6 +15,7 @@
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Materials/MaterialInterface.h"
+#include "MmdBoneTranslationFix.h"
 #include "MmdMorphAnimation.h"
 #include "MmdOutlineComponent.h"
 #include "MmdPhysicsCoreLog.h"
@@ -200,6 +201,28 @@ FMmdActorResult FMmdActorBuilder::BuildActor(USkeletalMesh* Mesh, const FString&
 			//   (詳しくは MmdMorphAnimation.h)。
 			if (!GlbPath.IsEmpty())
 			{
+				// アニメーションのアセットを 1 度でも書き換えたか。
+				// ★保存は最後に 1 回だけにする。書き換える処理が複数あるので、
+				//   それぞれが自分の条件で保存すると「片方だけ保存されない」が起きる。
+				bool bAnimDirty = false;
+
+				// ★古い .glb の保険: 移動できないボーンに焼かれた translation を
+				//   参照ポーズへ戻す。新しい .glb では何も起きない
+				//   (詳しくは MmdBoneTranslationFix.h の注記)。
+				const FMmdTranslationFixResult Fix =
+					FMmdBoneTranslationFix::Apply(Result.Animation, GlbPath);
+				Result.TranslationTracksReset = Fix.TracksReset;
+				if (!Fix.bSuccess)
+				{
+					// 致命ではない。判定できなければ元のまま流すだけ。
+					UE_LOG(LogMmdPhysics, Warning,
+						TEXT("[MmdPhysics] translation の検査ができませんでした: %s"), *Fix.Message);
+				}
+				else if (Fix.TracksReset > 0)
+				{
+					bAnimDirty = true;
+				}
+
 				const FMmdMorphAnimResult Morph =
 					FMmdMorphAnimation::ApplyMorphCurves(Mesh, Result.Animation, GlbPath);
 				Result.MorphCurvesAdded = Morph.CurvesAdded;
@@ -213,7 +236,7 @@ FMmdActorResult FMmdActorBuilder::BuildActor(USkeletalMesh* Mesh, const FString&
 				{
 					if (Morph.CurvesAdded > 0)
 					{
-						SaveAsset(Result.Animation);
+						bAnimDirty = true;
 					}
 					// ★スケルトンも保存する。「このカーブはモーフを動かす」という登録は
 					//   スケルトン側にあり、アニメーションを保存しても付いてこない。
@@ -223,6 +246,11 @@ FMmdActorResult FMmdActorBuilder::BuildActor(USkeletalMesh* Mesh, const FString&
 					{
 						SaveAsset(Result.Animation->GetSkeleton());
 					}
+				}
+
+				if (bAnimDirty)
+				{
+					SaveAsset(Result.Animation);
 				}
 			}
 			if (Result.AnimationCandidates > 1)
@@ -277,13 +305,19 @@ FMmdActorResult FMmdActorBuilder::BuildActor(USkeletalMesh* Mesh, const FString&
 
 	Result.bSuccess = true;
 	Result.Blueprint = Blueprint;
+
+	// 0 のときは出さない。0 が普通の状態 (= .glb が新しい) なので、
+	// 毎回並べると「何かした」ように見えてしまう。
+	const FString FixNote = Result.TranslationTracksReset > 0
+		? FString::Printf(TEXT(" / 古い .glb の translation を戻した %d 本"), Result.TranslationTracksReset)
+		: FString();
 	Result.Message = FString::Printf(
-		TEXT("アクターを生成しました: %s (輪郭線 %s / 毛先パス %s / アニメーション %s / 表情モーフ %d 本)"),
+		TEXT("アクターを生成しました: %s (輪郭線 %s / 毛先パス %s / アニメーション %s / 表情モーフ %d 本%s)"),
 		*FullPath,
 		Result.bHasOutline ? TEXT("あり") : TEXT("なし"),
 		Result.bHasSoftPass ? TEXT("あり") : TEXT("なし"),
 		Result.Animation != nullptr ? *Result.Animation->GetName() : TEXT("なし"),
-		Result.MorphCurvesAdded);
+		Result.MorphCurvesAdded, *FixNote);
 	UE_LOG(LogMmdPhysics, Log, TEXT("[MmdPhysics] %s"), *Result.Message);
 	return Result;
 }
