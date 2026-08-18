@@ -42,6 +42,13 @@ UE ではその前提が成り立ちません）。
 - **数学型は自前を維持**（`Vec3` / `Quat` / `Matrix4x4` / `RigidTransform` / `Matrix3x3`）
 - コード内の日本語コメント（事故記録・実測値）はすべて残す。移植元の設計判断の記録そのもの
 
+★**「1:1」はエンジン内部（`MmdPhysicsCore`）の話です。** 書き戻しと再生時の設定は 3 か所で
+意図的に移植元と変えてあります（`Align` の mode1 の扱い / ノード既定 `JointVelocityIterations`・
+`JointMaxCorrectionVel` / `TeleportResetThreshold`）。いずれもコア既定は従来とビット不変なので
+`MmdPhysics.Core.GlbParity` は通ります。理由は「長い鎖が伸び続ける（「しっぽバグ」）」を参照。
+★`GlbParity` はエンジンだけを見ており、`ComputeAlignedBonePoses`（書き戻し）は検査範囲外です。
+書き戻しの回帰は `MmdPhysics.Editor.ChainStability` でしか捕まりません。
+
 ## ファイル対応表
 
 移植元は `.upstream/unity/Assets/MMD_Scripts/MmdPhysics/`。
@@ -102,6 +109,10 @@ git clone --depth 1 https://github.com/masaka1024/mmd2gltf-unity-physics-importe
 
 ★`FixedTimeStep` は 1/60 のまま触らないこと。細刻みが欲しいときは `SubSteps` を増やします
 （移植元 `MmdPhysicsBehaviour.cs` の注記と同じ方針）。
+
+**ノードとコアで既定が違うものは、あとから 2 つ増えました**（`JointVelocityIterations` 0 / **40**、
+`JointMaxCorrectionVel` 0 / **30**）。どちらもコア既定 0 = 従来とビット不変で、再生時の値はノードが
+持つという上と同じ枠組みです。理由は「長い鎖が伸び続ける（「しっぽバグ」）」を参照。
 
 ### 静止しているのに揺れ続ける（Baumgarte が実速度へ漏れる）
 
@@ -182,6 +193,69 @@ git clone --depth 1 https://github.com/masaka1024/mmd2gltf-unity-physics-importe
 適用した後の骨格に合わせる必要があるため、1 フレームでは足りません）。
 
 モーションの切り替え直後・ループの折り返し・テレポート直後に呼ぶのが想定用途です。
+
+### 長い鎖が伸び続ける（「しっぽバグ」）
+
+**症状。** 揺れ物の鎖のボーン間距離が参照ポーズから外れ、しっぽが床まで落ちていきます。
+実測（Tda式初音ミク・アペンド、20 秒）で しっぽ３ が **220 倍**、しっぽ１３ が 303 倍。
+IA では 前髪C2 が最小 0.43 倍という軽い出方をしていました。
+
+**原因は 3 つあり、全部別物です。** 切り分けは `MmdPhysics.Editor.ChainStability` の
+環境変数で行いました（`.glb` 側のデータは健全であることを先に確認しています。移動不可ボーンの
+translation は 0 本、ジョイントの `pos_min`/`pos_max` も 0）。
+
+**(A) ソルバがジョイントを解ききれていない。**
+Gauss-Seidel は 1 反復で 1 本ぶんしか伝えないので、13 節の鎖では拘束が末端まで届きません。
+解き残しが位置誤差として毎フレーム単調に溜まり（アンカー差 0.01→0.05→0.15cm と**一度も戻らない**）、
+誤差が位置補正の上限を超えると二度と閉じなくなります。20 秒後には鎖が 55cm/秒 で落ち続けます。
+→ `PhysicsWorld` に `JointVelocityIterations`（ノード既定 **40**。速度求解でジョイントだけ追加で回す）と
+`JointMaxCorrectionVel`（ノード既定 **30**。`Joint::MaxCorrectionVel` の上書き）を追加。
+
+★**この 2 つは対でしか効きません。** 反復だけ 40 → 120 秒で 201 倍。上限だけ無制限 → 20 秒で 426 倍と
+**悪化**します（速度が収束していないのに補正を強めると行き過ぎる）。上限は「発散を止められる範囲で
+**一番弱い値**」が正解で、低すぎても高すぎても壊れます（233 秒では 100 が 468 倍で破綻し、30 が通る）。
+接触の反復（`SolverIterations`）は上げません — 待機区間の揺れが悪化する実測があります。
+
+**(B) 書き戻しが mode1 と mode2 で別々の位置ソースを混ぜていた。**
+`PmxPhysicsBuilder::Align` は物理ボーンの位置を親から bind 長で再構成しますが、書き戻しは
+mode1 に**剛体の生位置**を使います。親が mode1 でも `Align` は再構成した値を使うので、
+実際に書き出される鎖とは**別の鎖**ができます。MMD の mode2 は「親ボーンの**実際の**現在姿勢 +
+bind ローカルオフセット」なので、親を再帰で作り直しているのが仕様との食い違いでした。
+→ `ComputeAlignedBonePoses` に `bAlignAllPositions` を足し、mode1 のボーンは生の姿勢を返す。
+
+★**C# 版も同じ欠陥を持っています**（`PmxPhysicsBuilder.cs` + `MmdPhysicsBehaviour.PullPhysicsToBones`）。
+仕様のほうを正としたので、ここは意図的に移植元と違います（`bAlignBonePositions=true` なら従来どおり）。
+このモデルで長い鎖のうち mode1 の上に mode2 の末端が乗るのは しっぽ だけで、
+「しっぽだけ伸びる」という症状と一致していました。
+
+**(C) アニメのループ境界のテレポート。**
+最終フレーム→先頭のポーズジャンプ（左腕 31.6cm/フレーム）が kinematic 速度になって鎖を薙ぎ払い、
+しっぽ２ が一過性 3.25 倍になります（ラチェットではなくスパイク型）。
+→ `FAnimNode_MmdPhysics` に `TeleportResetThreshold`（既定 **3 PMX 単位 = 24cm/フレーム**）を追加。
+駆動剛体のターゲットが 1 フレームでこれ以上飛んだら、起動時と同じ再整合を張り直します。
+
+★**テレポート時の再整合は必ず起動時と同じ経路を通すこと**（`StartupResetCountdown =
+PoseResetDelayFrames` を張って既存の分岐に任せる）。一発 reset + そのフレームの物理停止を試したら
+**371 倍へ悪化**しました。
+
+**検証:** Tda 233 秒（曲の全長）で しっぽ３ 1.20 倍 / 466 秒（ループ 1 回跨ぎ）1.35 倍 /
+IA 60 秒 / `MmdPhysics.Core` 9 件（`GlbParity` のビット一致を含む）すべて green。
+ダンス 233 秒中のテレポート誤検出は 0 回。
+**代償:** IA の待機区間の揺れが悪化します（`max_last` 6.40→7.81cm / `mean_last` 1.13→1.71cm。
+主因は反復 40 のほうで、上限を足すと 1.71 まで戻ります）。
+
+**外れた対策（実測で否定。同じ道を二度通らないこと）:**
+
+- 位置補正（split-impulse）側の反復を増やす … 単独では 178 倍。速度側を直した上で増やすと**悪化**
+  （120 秒が Success → しっぽ４ 376 倍）。位置補正は「足りない」のではなく「強めると暴れる」側
+- `SolverIterations` を上げる … ジョイントに効いているだけ。接触まで上げる意味は無い
+- `しっぽ吊` を外す / 接触 / スリープ … すべて無関係（接触は左ひざと 0.1cm・力積 0.96 のみ）
+
+**残件: 髪・腰ベルトのゆっくりした漏れ。** どの設定でも 60 秒で 右髪２ 2.2〜2.9 倍、
+腰ベルト２ 1.5〜1.9 倍、120 秒で 3.3 倍になります。上の急激な破綻とは桁が違う別現象で、まだ直っていません。
+第一容疑は `Joint::LinearLeverMode`（既定 0 は Bullet 実機の既定 mode2 と違い、アンカーが開いたときの
+偽トルク `e×P` の出方が変わる）。`MMD_CHAIN_SOLVER` に `levermode=` / `mixedaxes=` / `jointwarm=` /
+`jointwarmang=` / `jointsfirst=` のノブだけ足してあります。
 
 ## 半透明の扱い（lilToon → UE マテリアル）
 
@@ -883,7 +957,7 @@ $env:MMD_TOON_RAMP_PACKAGE = "/Game/MmdToonRampTest"
 | `MmdPhysics.Editor.ToonRamp` | 近似トゥーンのテーブル（明部色 / 陰部色 / 境界位置 / ぼかし幅）が生成画素に出ているか。最上段＝明部色・最下段＝陰部色、境界でちょうど中間色、ぼかし幅の外は平坦。**データ不要** |
 | `MmdPhysics.Editor.ToonRampAsset` | 近似トゥーンを実際に `UTexture2D` アセットにする経路（テクスチャ設定と、2 回目に作り直さないこと）。`MMD_TOON_RAMP_PACKAGE` が未設定ならスキップ |
 | `MmdPhysics.Editor.MorphCurveName` | モーフ名が UE のリグ名規則に載るか（`▲` `∧` `□` が同じ名前に潰れて衝突すること、仮名・漢字・英数字は無事なこと、100 文字で切られること）と、化けたカーブを見分ける像（`CollectRigMangledNames`）が載る名前を巻き込まないか。**データ不要** |
-| `MmdPhysics.Editor.ChainStability` | **アニメーションを再生しながら**、揺れ物の鎖のボーン間距離が参照ポーズから**伸びも縮みも**しないか（親フレームを取り違えて焼かれた鎖は末端が伸びて手前が縮むので、片側だけ見ると取りこぼす）。`MMD_CONV_SKELMESH` と `MMD_PARITY_GLB` を使う。切り分け用に `MMD_CHAIN_SECONDS` / `MMD_CHAIN_NOANIM`（静止のまま回す）/ `MMD_CHAIN_NOPHYS`（物理を切る）で条件を変えられる。★見ているのは長さだけで、向きの誤りは検出できない |
+| `MmdPhysics.Editor.ChainStability` | **アニメーションを再生しながら**、揺れ物の鎖のボーン間距離が参照ポーズから**伸びも縮みも**しないか（親フレームを取り違えて焼かれた鎖は末端が伸びて手前が縮むので、片側だけ見ると取りこぼす）。`MMD_CONV_SKELMESH` と `MMD_PARITY_GLB` を使う。切り分け用に `MMD_CHAIN_SECONDS` / `MMD_CHAIN_NOANIM`（静止のまま回す）/ `MMD_CHAIN_NOPHYS`（物理を切る）で条件を変えられるほか、`MMD_CHAIN_TRACE_BONES`（ボーンのワールド位置）/ `MMD_CHAIN_TRACE_JOINTS`（アンカー差と剛体速度）/ `MMD_CHAIN_TRACE_CONTACTS`（接触の相手・距離・法線力積）/ `MMD_CHAIN_TRACE_EVERY`（出力間隔フレーム）/ `MMD_CHAIN_SOLVER`（`iter=` `sub=` `fixed=` `split=` `jointsplit=` `align=` `merge=` `gravity=` `levermode=` `mixedaxes=` `jointwarm=` `jointwarmang=` `jointsfirst=` をノードへ差し替え）/ `MMD_CHAIN_MAXCORR` / `MMD_CHAIN_DISABLE_JOINTS` で内部を覗ける（未設定なら挙動は変わらない）。剛体を覗くための `FAnimNode_MmdPhysics::GetBuilderForDiagnostics()` もある。★見ているのは長さだけで、向きの誤りは検出できない |
 | `MmdPhysics.Bridge.UeSpace` | 位置と回転が同一の純回転か（行列式 +1） |
 | `MmdPhysics.Bridge.ImportConvention` | 実際に取り込んだスケルトンと座標系が合うか |
 | `MmdPhysics.Editor.WirePhysics` | 配線 → 評価 → 書き戻しが端から端まで通るか |

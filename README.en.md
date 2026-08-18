@@ -7,7 +7,12 @@ UE skeletal mesh with it.
 
 This is the UE5 counterpart of
 [`mmd2gltf-unity-physics-importer`](https://github.com/masaka1024/mmd2gltf-unity-physics-importer).
-Unofficial, independent personal project.
+
+> **This is an unofficial, independent personal project.**
+> It is not affiliated with, endorsed by, or supported by MikuMikuDance (Yu Higuchi), PmxEditor
+> (Kyokuhoku-P), Bullet Physics, Epic Games, or the authors of any model or motion. "MMD" and "PMX"
+> are used only to refer to the specifications and to the behaviour being compared against.
+> Matching that behaviour is a goal, not a guarantee.
 
 Japanese: [README.md](README.md)
 
@@ -27,14 +32,24 @@ bones directly. It deliberately does not map MMD physics onto UE's `PhysicsAsset
 - The Unity project already built and then abandoned a PhysX-based implementation
   (importer went from 3,541 lines with 49 tuning sliders down to 1,160 lines with none)
 
-### Bit-exact with the source implementation
+### The physics engine is bit-exact with the source implementation
 
 The engine is a 1:1 translation of the Unity version's C# into C++. An automated test verifies that
 after **300 frames on a real model** (117 rigid bodies, 165 joints), every body's position and
 rotation matches the C# original **exactly**.
 
-See [docs/porting_notes.md](docs/porting_notes.md) for details, including the floating-point mode
-setting that was required to achieve this.
+★**What matches is the engine core (`MmdPhysicsCore`). Playback behaviour deliberately differs from
+the C# version in three places.**
+
+| Difference | Why |
+|---|---|
+| `PmxPhysicsBuilder::Align` returns the **raw rigid-body pose** for mode1 (bone-following) bones | MMD's [physics + bone alignment] mode is relative to the parent bone's **actual** current pose. Rebuilding the parent from bind lengths produces two different chains, so the tip of a long chain stretches and shrinks (the C# version has the same flaw). Set `bAlignBonePositions=true` for the original behaviour |
+| Node defaults `JointVelocityIterations=40` / `JointMaxCorrectionVel=30` | On a 13-link chain the joint solve never reaches the tip; the residual accumulates every frame and never closes. **The two only work as a pair** — either one alone makes things worse |
+| `TeleportResetThreshold` (default 3 PMX units = 24 cm/frame) | At an animation loop point the pose jump becomes a kinematic velocity that sweeps the chain aside. When a jump is detected, the same re-alignment used at startup is applied |
+
+The **engine's core defaults are all 0, i.e. bit-identical to the original**, so the parity above
+still holds. See [docs/porting_notes.md](docs/porting_notes.md) for details, including the
+floating-point mode setting that was required to achieve this.
 
 ---
 
@@ -153,7 +168,7 @@ Derivation and measured validation: [docs/coordinate_transform.md](docs/coordina
 
 | | Status |
 |---|---|
-| UE 5.5 | Development and verification target. 15 automated tests green |
+| UE 5.5 | Development and verification target. 20 automated tests green |
 | UE 5.6 | Source-level compatibility only. **Not verified on a real install** |
 
 ## Known limitations
@@ -214,8 +229,22 @@ Derivation and measured validation: [docs/coordinate_transform.md](docs/coordina
 - `SoftBody` (PMX 2.1) is not ported — the source builder does not use it either.
 - The `.pmx` direct-read verification path (`PmxReader`) is not ported.
 - Small jitter at rest is inherited from the source implementation.
+- **Over long playback, hair and belt chains stretch slowly.** Measured: after 60 seconds
+  a hair bone (右髪２) reaches 2.2–2.9x its bind length and a belt bone (腰ベルト２) 1.5–1.9x
+  (3.3x at 120 seconds). The violent failure on
+  long tail chains is fixed (see the table under "The physics engine is bit-exact with the source
+  implementation"), but this slow drift remains. Call **`Reset MMD Physics`** from a Blueprint to
+  snap everything back. The automated test `MmdPhysics.Editor.ChainStability` detects it.
 
 ## License
 
 MIT License. See [LICENSE](LICENSE).
-No model data or shared toon textures are bundled.
+
+The bundled physics engine is a C++ port of
+[`mmd2gltf-cs-physics`](https://github.com/masaka1024/mmd2gltf-cs-physics) (a C# reimplementation of
+PMX 2.1 physics matched to Bullet 2.75 behaviour; MIT). Numerical parity is measured against that
+same C# code as vendored in
+[`mmd2gltf-unity-physics-importer`](https://github.com/masaka1024/mmd2gltf-unity-physics-importer)
+(MIT), which is **linked, not copied**, into the build (see [INSTALL.md](INSTALL.md)).
+
+No model data, motions, or MMD's bundled shared toon textures (`toon01`–`toon10`) are included.
