@@ -116,7 +116,29 @@ namespace MmdPhysics
 				Vec3(m.m02, m.m12, m.m22));
 		}
 
+		/**
+		 * Bullet 2.75 btMatrix3x3::setRotation (btMatrix3x3.h:136) の移植。
+		 * FromQuat と数学的には同じだが **式と丸めが違う**。
+		 * ロック軸の限界判定は「変位が厳密に 0 かどうか」で行を作る/作らないが決まるため、
+		 * この 1e-8 レベルの残差の有無がそのまま拘束の有無に化ける。
+		 */
+		static Matrix3x3 FromQuatBullet(const Quat& q)
+		{
+			const float d = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
+			const float sc = 2.0f / d;
+			const float xs = q.x * sc, ys = q.y * sc, zs = q.z * sc;
+			const float wx = q.w * xs, wy = q.w * ys, wz = q.w * zs;
+			const float xx = q.x * xs, xy = q.x * ys, xz = q.x * zs;
+			const float yy = q.y * ys, yz = q.y * zs, zz = q.z * zs;
+			return Matrix3x3(
+				Vec3(1.0f - (yy + zz), xy - wz,          xz + wy),
+				Vec3(xy + wz,          1.0f - (xx + zz), yz - wx),
+				Vec3(xz - wy,          yz + wx,          1.0f - (xx + yy)));
+		}
+
 		Vec3 Column(int32 i) const { return Vec3(Row0[i], Row1[i], Row2[i]); }
+
+		Vec3 Row(int32 i) const { return i == 0 ? Row0 : (i == 1 ? Row1 : Row2); }
 
 		friend Vec3 operator*(const Matrix3x3& m, const Vec3& v)
 		{
@@ -133,6 +155,33 @@ namespace MmdPhysics
 		}
 
 		Matrix3x3 Transposed() const { return Matrix3x3(Column(0), Column(1), Column(2)); }
+
+		/**
+		 * Bullet 2.75 btMatrix3x3::inverse() の移植 (btMatrix3x3.h:536)。
+		 * **余因子行列 ÷ 行列式** であって転置ではない。直交行列なら数学的には転置と同じだが、
+		 * 浮動小数の値が違う: 転置は元の成分をそのまま並べ替えるので厳密な 0 が保たれるのに対し、
+		 * 余因子は積と差を通るので厳密な 0 にならない。
+		 *
+		 * ★これが効くのは Bullet がロック軸の変位 (testLimitValue に食わせる値) を
+		 *   calculateLinearInfo / calculateAngleInfo でこの逆行列から作っているため。
+		 *   転置で代用するとバインド姿勢のような「誤差が厳密に 0」の姿勢で
+		 *   testLimitValue が 0 (=行不要) を返しすぎ、拘束そのものが消える。
+		 */
+		Matrix3x3 BulletInverse() const
+		{
+			auto Cofac = [this](int32 r1, int32 c1, int32 r2, int32 c2)
+			{
+				return Row(r1)[c1] * Row(r2)[c2] - Row(r1)[c2] * Row(r2)[c1];
+			};
+
+			const Vec3 co(Cofac(1, 1, 2, 2), Cofac(1, 2, 2, 0), Cofac(1, 0, 2, 1));
+			const float det = Row0.Dot(co);
+			const float sc = 1.0f / det;
+			return Matrix3x3(
+				Vec3(co.x * sc, Cofac(0, 2, 2, 1) * sc, Cofac(0, 1, 1, 2) * sc),
+				Vec3(co.y * sc, Cofac(0, 0, 2, 2) * sc, Cofac(0, 2, 1, 0) * sc),
+				Vec3(co.z * sc, Cofac(0, 1, 2, 0) * sc, Cofac(0, 0, 1, 1) * sc));
+		}
 
 		/** this * diag(scale) * this^T — basis に対角テンソルを回転適用。 */
 		Matrix3x3 Scaled(const Vec3& Scale) const

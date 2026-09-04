@@ -6,8 +6,15 @@
 namespace MmdPhysics
 {
 	float Joint::MaxCorrectionVel = 10.0f;
-	bool Joint::AngularMixedAxes = false;
-	int32 Joint::LinearLeverMode = 0;
+	bool Joint::AngularMixedAxes = true;          // ★完全セット v1 で既定 ON
+	bool Joint::BulletAngleConvention = true;     // ★完全セット v1 で既定 ON
+	bool Joint::SpringAsMotorRow = true;          // ★ばねをモーター行で解く
+	bool Joint::BulletLimitRowGating = true;      // ★完全セット v1 で既定 ON
+	int32 Joint::LinearLeverMode = 1;             // ★完全セット v1 で既定 ON
+	float Joint::LeverArmGate = 5.0f;             // ★タスク78 で既定化
+	int64 Joint::LeverArmGateHits = 0;
+	int32 Joint::SolverIterationsForSpring = 0;
+	float Joint::LockedRowImpulseBound = TNumericLimits<float>::Max();
 	int64 Joint::WarmAngRows = 0;
 	int64 Joint::WarmAngToggles = 0;
 	float Joint::WarmStartFactor = 0.85f;
@@ -104,7 +111,24 @@ namespace MmdPhysics
 
 		// 回転相対 (角度行と、LinearLeverMode=2 の rotAllowed 判定で使用)。
 		const Quat qRel = _worldA.Rotation.Conjugated() * _worldB.Rotation;
-		const Vec3 euler = ToEulerXYZ(qRel.Normalized());
+		Vec3 euler = ToEulerXYZ(BulletAngleConvention ? qRel.Conjugated().Normalized() : qRel.Normalized());
+
+		// ★Bullet の calculateLinearInfo / calculateAngleInfo と同じ作り方で
+		//   「ロック軸の変位」を出す。行を作る/作らないが「変位が厳密に 0 か」で決まるので、
+		//   ここは式と丸めまで Bullet に合わせないと拘束の有無そのものが変わる。
+		Vec3 linDiffBt = Vec3::Zero;
+		if (BulletLimitRowGating)
+		{
+			const Matrix3x3 bmA = Matrix3x3::FromQuatBullet(BodyA->WorldTransform.Rotation);
+			const Matrix3x3 bmB = Matrix3x3::FromQuatBullet(BodyB->WorldTransform.Rotation);
+			const Matrix3x3 basisAbt = bmA * Matrix3x3::FromQuatBullet(FrameInA.Rotation);
+			const Matrix3x3 basisBbt = bmB * Matrix3x3::FromQuatBullet(FrameInB.Rotation);
+			const Vec3 oA = bmA * FrameInA.Origin + BodyA->WorldTransform.Origin;
+			const Vec3 oB = bmB * FrameInB.Origin + BodyB->WorldTransform.Origin;
+			const Matrix3x3 invBasisA = basisAbt.BulletInverse();
+			linDiffBt = invBasisA * (oB - oA);
+			euler = ToEulerXYZBullet(invBasisA * basisBbt, BulletAngleConvention);
+		}
 
 		// LinearLeverMode=2 用の前計算 (Bullet calculateTransforms / setLinearLimits 相当)。
 		bool hasStatic = false; float factA = 0.5f, factB = 0.5f;
@@ -128,14 +152,34 @@ namespace MmdPhysics
 		{
 			const Vec3 axis = _axesA[i];
 			const float lo = LinearLowerLimit[i], hi = LinearUpperLimit[i];
-			if (IsFree(lo, hi)) continue;
+			const float curF = BulletLimitRowGating ? linDiffBt[i] : linDelta.Dot(axis);
+			if (IsFree(lo, hi))
+			{
+				if (SpringAsMotorRow) AddSpringMotorRow(false, i, axis, curF, lo, hi, rA, rB, invDt);
+				continue;
+			}
 
-			const float cur = linDelta.Dot(axis);
+			const float cur = curF;
 			float err, lower, upper;
-			if (IsLocked(lo, hi)) { err = lo - cur; lower = -1e18f; upper = 1e18f; }
-			else if (cur < lo) { err = lo - cur; lower = 0.0f; upper = 1e18f; }
-			else if (cur > hi) { err = hi - cur; lower = -1e18f; upper = 0.0f; }
-			else continue; // 制限内 → バネのみ (後段)
+			// Bullet はロック軸でも変位がちょうど限界値なら行を作らない。
+			if (BulletLimitRowGating && IsLocked(lo, hi) && TestLimitValue(cur, lo, hi) == 0)
+			{
+				if (SpringAsMotorRow) AddSpringMotorRow(false, i, axis, cur, lo, hi, rA, rB, invDt);
+				continue;
+			}
+			// ★ロック行/リミット行のインパルス上下限。Bullet は SIMD_INFINITY を使う。
+			//   ここが **質量次元の絶対定数** なので、質量が極端なモデルでは
+			//   「実効質量 x 速度誤差」が上限に張り付き、補正が勝手に頭打ちになる。
+			const float BND = LockedRowImpulseBound;
+			if (IsLocked(lo, hi)) { err = lo - cur; lower = -BND; upper = BND; }
+			else if (cur < lo) { err = lo - cur; lower = 0.0f; upper = BND; }
+			else if (cur > hi) { err = hi - cur; lower = -BND; upper = 0.0f; }
+			else
+			{
+				// 制限内 → Bullet は limit=0。モーター行だけが立つ。
+				if (SpringAsMotorRow) AddSpringMotorRow(false, i, axis, cur, lo, hi, rA, rB, invDt);
+				continue;
+			}
 
 			// レバーアームをモード別に決定 (LinearLeverMode コメント参照)。
 			Vec3 armA = rA, armB = rB;
@@ -143,6 +187,14 @@ namespace MmdPhysics
 			{
 				armA = _anchorB - BodyA->CenterOfMass();   // 両剛体とも B側アンカー基準
 				armB = rB;
+				// ★腕長ゲート: アンカー誤差が自分の腕 (|rA|+|rB|) の LeverArmGate 倍を超えた行だけ
+				//   armA を rA へ落として正のフィードバックを断つ。0 で完全に無効 = ビット不変。
+				if (LeverArmGate > 0.0f)
+				{
+					const float scale = rA.Length() + rB.Length();
+					const float ratio = scale > 1e-9f ? (_anchorB - _anchorA).Length() / scale : 0.0f;
+					if (ratio > LeverArmGate) { armA = rA; LeverArmGateHits++; }
+				}
 			}
 			else if (LinearLeverMode == 2)
 			{
@@ -176,17 +228,31 @@ namespace MmdPhysics
 		}
 		for (int32 i = 0; i < 3; i++)
 		{
-			const Vec3 axis = AngularMixedAxes ? (i == 0 ? mix0 : i == 1 ? mix1 : mix2) : _axesA[i];
+			Vec3 axis = AngularMixedAxes ? (i == 0 ? mix0 : i == 1 ? mix1 : mix2) : _axesA[i];
+			if (BulletAngleConvention) axis = -axis;
 			const float lo = AngularLowerLimit[i], hi = AngularUpperLimit[i];
-			if (IsFree(lo, hi)) continue;
+			if (IsFree(lo, hi))
+			{
+				if (SpringAsMotorRow) AddSpringMotorRow(true, i, axis, euler[i], lo, hi, Vec3::Zero, Vec3::Zero, invDt);
+				continue;
+			}
 
 			const float cur = euler[i];
 			float err, lower, upper;
 			int32 sideCode;
+			if (BulletLimitRowGating && IsLocked(lo, hi) && TestLimitValue(cur, lo, hi) == 0)
+			{
+				if (SpringAsMotorRow) AddSpringMotorRow(true, i, axis, cur, lo, hi, Vec3::Zero, Vec3::Zero, invDt);
+				continue;
+			}
 			if (IsLocked(lo, hi)) { err = lo - cur; lower = -1e18f; upper = 1e18f; sideCode = 0; }
 			else if (cur < lo) { err = lo - cur; lower = 0.0f; upper = 1e18f; sideCode = 1; }
 			else if (cur > hi) { err = hi - cur; lower = -1e18f; upper = 0.0f; sideCode = 2; }
-			else continue;
+			else
+			{
+				if (SpringAsMotorRow) AddSpringMotorRow(true, i, axis, cur, lo, hi, Vec3::Zero, Vec3::Zero, invDt);
+				continue;
+			}
 
 			AddAngularRow(axis, Clamp(err * Beta * invDt), lower, upper, i, sideCode);
 		}
@@ -292,9 +358,120 @@ namespace MmdPhysics
 	//   mEff はソルバ本体 (AddLinearRow / AddAngularRow) と同一の式で求めるため、
 	//   クランプが効かない範囲 (k*dt²/m < 1) では従来と1ビットも変わらない。
 	//   実測A/B(300step 全剛体姿勢ハッシュ): IA系3モデルはビット完全一致、Racing_Miku2023 は NaN→完走。
+	// Bullet 2.75 btGeneric6DofConstraint の testLimitValue 相当。
+	//   0 = 行を作らない (free / ちょうど限界内)、1 = 上限側、2 = 下限側。
+	int32 Joint::TestLimitValue(float v, float lo, float hi)
+	{
+		if (lo > hi) return 0;          // free
+		if (v < lo) return 2;
+		if (v > hi) return 1;
+		return 0;                       // ちょうど限界内 (ロック軸の err==0 を含む)
+	}
+
+	// Bullet 2.75 btRotationalLimitMotor / btTranslationalLimitMotor の m_limitSoftness 相当。
+	//   目標速度が限界を越えて押し出す向きのときだけ、越える手前で 0 へ落とす係数。
+	float Joint::MotorFactor(float pos, float lowLim, float uppLim, float vel, float timeFact)
+	{
+		if (lowLim > uppLim) return 1.0f;
+		if (lowLim == uppLim) return 0.0f;
+		float limFact = 1.0f;
+		const float deltaMax = timeFact != 0.0f ? vel / timeFact : 0.0f;
+		if (deltaMax < 0.0f)
+		{
+			if (pos >= lowLim && pos < (lowLim - deltaMax)) limFact = (lowLim - pos) / deltaMax;
+			else if (pos < lowLim) limFact = 0.0f;
+			else limFact = 1.0f;
+		}
+		else if (deltaMax > 0.0f)
+		{
+			if (pos <= uppLim && pos > (uppLim - deltaMax)) limFact = (uppLim - pos) / deltaMax;
+			else if (pos > uppLim) limFact = 0.0f;
+			else limFact = 1.0f;
+		}
+		else limFact = 0.0f;
+		return limFact;
+	}
+
+	/**
+	 * ばねを **ソルバの行 (モーター行)** として立てる。
+	 * Bullet の 6DOF ばねは enableSpring した軸の m_targetVelocity / m_maxMotorForce を
+	 * 毎ステップ書き換えてモーター行として解く (btGeneric6DofSpringConstraint::internalUpdateSprings)。
+	 * 陽的インパルスで後から足す従来経路と違い、他の行と同じ反復の中で釣り合うので
+	 * 「ばねだけが行き過ぎて次の反復で押し戻される」という往復が起きない。
+	 */
+	void Joint::AddSpringMotorRow(bool bAngular, int32 i, const Vec3& Axis, float cur, float lo, float hi,
+	                              const Vec3& rA, const Vec3& rB, float invDt)
+	{
+		const float k = bAngular ? SpringAngular[i] : SpringLinear[i];
+		if (k <= 0.0f) return;
+		const float fps = invDt;                              // = 1/サブステップdt
+		if (fps <= 0.0f) return;
+		const float eq = ClampToLimit(0.0f, lo, hi);          // 平衡点 (当エンジンの従来定義)
+		const float delta = cur - eq;
+		const int32 iters = SolverIterationsForSpring > 0 ? SolverIterationsForSpring : 10;
+		const float velFactor = fps * BulletSpringDamping / iters;
+		const float force = delta * k;
+		float targetVel = -velFactor * force;
+		const float maxMotorForce = FMath::Abs(force) / fps;
+		const float motFact = MotorFactor(cur, lo, hi, targetVel, fps * Beta);
+		targetVel *= motFact;
+
+		Vec3 armA = rA, armB = rB;
+		if (LinearLeverMode == 1)
+		{
+			armA = _anchorB - BodyA->CenterOfMass();
+			if (LeverArmGate > 0.0f)
+			{
+				const float gscale = rA.Length() + rB.Length();
+				if ((_anchorB - _anchorA).Length() > LeverArmGate * gscale)
+				{ armA = rA; LeverArmGateHits++; }
+			}
+		}
+
+		if (bAngular) { AddAngularRow(Axis, targetVel, -maxMotorForce, maxMotorForce, i, 5); return; }
+		AddLinearRow(Axis, armA, armB, targetVel, -maxMotorForce, maxMotorForce, i, false);
+	}
+
+	// Bullet 2.75 matrixToEulerXYZ (btGeneric6DofConstraint.cpp) の移植。
+	//   bulletElem=true のとき Bullet の 1 次元添字 (列優先) と同じ要素を拾う。
+	Vec3 Joint::ToEulerXYZBullet(const Matrix3x3& m, bool bBulletElem)
+	{
+		const float e02 = bBulletElem ? m.Row2.x : m.Row0.z;   // index 2
+		const float e12 = bBulletElem ? m.Row2.y : m.Row1.z;   // index 5
+		const float e22 = m.Row2.z;                            // index 8
+		const float e01 = bBulletElem ? m.Row1.x : m.Row0.y;   // index 1
+		const float e00 = m.Row0.x;                            // index 0
+		const float e10 = bBulletElem ? m.Row0.y : m.Row1.x;   // index 3
+		const float e11 = m.Row1.y;                            // index 4
+		float x, y, z;
+		if (e02 < 1.0f)
+		{
+			if (e02 > -1.0f)
+			{
+				x = MAtan2(-e12, e22);
+				y = MAsin(e02);
+				z = MAtan2(-e01, e00);
+			}
+			else
+			{
+				x = -MAtan2(e10, e11);
+				y = -static_cast<float>(PI / 2.0);
+				z = 0.0f;
+			}
+		}
+		else
+		{
+			x = MAtan2(e10, e11);
+			y = static_cast<float>(PI / 2.0);
+			z = 0.0f;
+		}
+		return Vec3(x, y, z);
+	}
+
 	void Joint::ApplySprings(float dt)
 	{
 		if (BodyA == nullptr || BodyB == nullptr) return;
+		if (SpringAsMotorRow) return;   // モーター行で解くので陽的経路は通さない (二重適用の防止)
 		const bool hasLin = SpringLinear.LengthSquared() > 0;
 		const bool hasAng = SpringAngular.LengthSquared() > 0;
 		if (!hasLin && !hasAng) return;

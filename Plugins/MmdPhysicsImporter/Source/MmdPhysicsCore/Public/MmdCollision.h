@@ -23,6 +23,14 @@ namespace MmdPhysics
 		Vec3 Normal;           // B から A へ向かう単位法線
 		float Distance = 0.0f; // 負値 = 貫入量
 
+		/**
+		 * このフレームのナローフェーズが「この点はまだ在る」と確認したか。
+		 * Refresh の頭で false に落とし、AddPoint が (既存に一致して置換 / 新規に追加)
+		 * したときだけ true になる。幻の定義そのもの (= 新点で確認されなかった古い点) を
+		 * 表すので、深い側の破棄をこのフラグが false の点だけに限定できる。
+		 */
+		bool ConfirmedThisStep = false;
+
 		// ソルバ用の蓄積インパルス (ウォームスタート)。
 		float NormalImpulse = 0.0f;
 		float TangentImpulse1 = 0.0f;
@@ -39,10 +47,62 @@ namespace MmdPhysics
 
 		PersistentManifold(RigidBody* a, RigidBody* b) : BodyA(a), BodyB(b) { Points.Reserve(4); }
 
+		/**
+		 * 接触点の管理 (同一判定・4点超過時の置換・破棄) を Bullet 2.75 btPersistentManifold の
+		 * 実ソースへ揃える (false で従来動作を再現できる)。
+		 *
+		 * 実測 (スカート網・60秒・両側 SubSteps=2) で支持面の育ち方が決定的に違った:
+		 *   59秒の点数分布  自前 1点=8 / 2点=10 / 3点=2 / 4点=1   総点数 38
+		 *                   Bullet 1点=7 / 2点=0 / 3点=2 / 4点=14  総点数 69
+		 * 支持面が育たない・安定しないので、スカートが載り切らずに揺れ続けていた。
+		 *
+		 * 揃える規則は3つ。**部品化しない** (Bullet 側で一体の仕組みなので):
+		 *   1. 同一判定  getCacheEntry   : LocalPointA の距離が閾値の2乗未満なら同じ点として置換。
+		 *   2. 4点超過時 sortCachedPoints: 4通りの組の面積 (外積長の2乗) の最大を残す。
+		 *                KEEP_DEEPEST_POINT で最深点は置換候補から外す。
+		 *   3. 破棄      refreshContactPoints: 法線距離 > 閾値、または法線へ射影した残差の
+		 *                長さの2乗 > 閾値の2乗 で破棄。
+		 * 閾値は形状サイズ比例の接触破棄閾値を使う。当てる値は作らない。
+		 */
+		static bool BulletManifoldPoints;
+
+		/**
+		 * validContactDistance を **深い側にも対称に**適用する。
+		 * 閾値は既存の contactBreakingThreshold をそのまま使い、新しいパラメータは足さない。
+		 *
+		 * ★これは Bullet に無い機構である。2.75 も現行 3.x master も片側判定のままで、
+		 *   深い側の番人はどこにも無い。
+		 *
+		 * なぜ要るか: 剛体が回ると保存済みローカル点は真の最近接から滑る。
+		 *   d = (worldA - worldB)·normal は法線が凍結したまま負へ暴走し、実測で真値
+		 *   「接触なし」のペアが d = -0.66 まで育った。片側判定は正の側しか見ず、横ずれ判定は
+		 *   法線方向のドリフトを捕まえないので、この点は誰にも殺されない。
+		 *   幻の d はそのまま接触 rhs に載る (定常窓の接触行の 14% がこの幻だった)。
+		 *
+		 * ★**鮮度条件つき**。破棄の対象は「そのフレームのナローフェーズに確認されなかった点」
+		 *   だけ (ContactPoint::ConfirmedThisStep)。無条件版は正当に深い接触まで毎フレーム捨てて
+		 *   warm-start を切ってしまい、スカートを 0.73x -> 0.17x と過減衰させた。
+		 */
+		static bool SymmetricBreakingDistance;
+
 		void Refresh();
 		void AddPoint(ContactPoint cp);
 
+		/**
+		 * 深い側の破棄。**Refresh → Detect → AddPoint のあとに** 呼ぶ。
+		 * このフレームのナローフェーズに確認されなかった点だけを対象にするので、
+		 * 毎フレーム作り直される正当な深い接触は無傷。
+		 */
+		void PruneStaleDeep();
+
 	private:
+		/** このペアの接触破棄閾値。Bullet の getContactBreakingThreshold() 相当。 */
+		float BreakingThreshold() const;
+
+		void RefreshBullet();
+		void AddPointBullet(ContactPoint cp);
+		int32 SortCachedPoints(const ContactPoint& pt) const;
+
 		int32 WorstPointIndex(const ContactPoint& Candidate) const;
 	};
 
@@ -72,6 +132,35 @@ namespace MmdPhysics
 		static float SpeculativeMargin;
 		static constexpr float SpeculativeMarginDefault = 0.02f;
 
+		/**
+		 * 接触の受理閾値を Bullet 2.75 の方式へ (false で従来動作を再現できる)。
+		 *   当エンジン: 全ペア一律 SpeculativeMargin = 0.02 の**固定距離**。
+		 *   Bullet 2.75: ペアごとに **形状サイズ比例**。
+		 *     btCollisionDispatcher.cpp:84
+		 *       threshold = min(shapeA->getContactBreakingThreshold(), shapeB->...)
+		 *     btCollisionShape.cpp:48
+		 *       getContactBreakingThreshold() = getAngularMotionDisc() * gContactThresholdFactor
+		 *       gContactThresholdFactor = 0.02 (btCollisionShape.cpp:18)
+		 *     btCollisionShape.cpp:52
+		 *       getAngularMotionDisc() = disc + |center|
+		 *   PMX の3形状はどれもローカル原点対称なので center = 0、disc = ローカル AABB の半対角。
+		 *   実測の差: 半幅(0.347,0.371,0.200)のスカート箱で Bullet 0.0109 に対し当方 0.02。
+		 *   **当方が約2倍広く拾っている** = 分離しているペアまで接触に上げている。
+		 */
+		static bool BulletContactThreshold;
+
+		/** Bullet 2.75 gContactThresholdFactor。つまみにしない (実ソースの値)。 */
+		static constexpr float ContactThresholdFactor = 0.02f;
+
+		/**
+		 * ペアの片側ぶんの接触破棄閾値。PersistentManifold からも使う。
+		 * ローカル AABB は **Bullet の getAabb と同じ取り方** をする:
+		 *   球     : (r,r,r)                    … margin = r なので実質そのまま
+		 *   箱     : HalfExtents                … getHalfExtentsWithMargin() と一致
+		 *   カプセル: (r,hh+r,r) + margin(0.04) … btCapsuleShape::getAabb が margin を足すため
+		 */
+		static float BulletBreakingThresholdOf(const CollisionShape* s);
+
 		// 安全弁の発動回数 (診断用。PhysicsWorld::DebugContactCount と同様の public フィールド)。
 		static int64 EpaIterCapHits;   // 反復上限で打ち切った回数
 		static int64 EpaFaceCapHits;   // 面数上限で打ち切った回数
@@ -84,6 +173,10 @@ namespace MmdPhysics
 		static void Detect(RigidBody* a, RigidBody* b, TArray<ContactPoint>& OutPoints);
 
 	private:
+		// このペアで使う受理閾値。Detect の冒頭で毎回決める。
+		//   エンジンは単一スレッドで回す前提 (PhysicsWorld のループは逐次)。
+		static float PairThreshold;
+
 		static constexpr int32 MaxIterations = 32;
 		static constexpr float Epsilon = 1e-7f;
 		// 縮退ガード用の小さな閾値。

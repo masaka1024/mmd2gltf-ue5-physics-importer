@@ -8,13 +8,119 @@ namespace MmdPhysics
 	float GjkEpa::SpeculativeMargin = 0.02f;
 	int64 GjkEpa::EpaIterCapHits = 0;
 	int64 GjkEpa::EpaFaceCapHits = 0;
+	bool GjkEpa::BulletContactThreshold = true;   // ★完全セット v1 で既定 ON
+	float GjkEpa::PairThreshold = GjkEpa::SpeculativeMarginDefault;
+
+	bool PersistentManifold::BulletManifoldPoints = true;        // ★完全セット v1 で既定 ON
+	bool PersistentManifold::SymmetricBreakingDistance = true;   // ★完全セット v1 で既定 ON
 
 	// =====================================================================
 	// PersistentManifold
 	// =====================================================================
 
+	float PersistentManifold::BreakingThreshold() const
+	{
+		return FMath::Min(GjkEpa::BulletBreakingThresholdOf(BodyA->Shape.Get()),
+		                  GjkEpa::BulletBreakingThresholdOf(BodyB->Shape.Get()));
+	}
+
+	// btPersistentManifold::refreshContactPoints の移植。
+	void PersistentManifold::RefreshBullet()
+	{
+		const float thr = BreakingThreshold();
+		const float thr2 = thr * thr;
+		for (int32 i = Points.Num() - 1; i >= 0; i--)
+		{
+			ContactPoint& cp = Points[i];
+			const Vec3 worldA = BodyA->WorldTransform.TransformPoint(cp.LocalPointA);
+			const Vec3 worldB = BodyB->WorldTransform.TransformPoint(cp.LocalPointB);
+			const float d = (worldA - worldB).Dot(cp.Normal);
+			cp.PositionWorldA = worldA;
+			cp.PositionWorldB = worldB;
+			cp.Distance = d;
+			// validContactDistance: 法線方向に閾値を超えて離れたら破棄。
+			if (d > thr) { Points.RemoveAt(i); continue; }
+			// 法線成分を除いた残差 (Bullet と同じ射影の取り方) が閾値の2乗を超えたら破棄。
+			const Vec3 projected = worldA - cp.Normal * d;
+			const Vec3 diff2 = worldB - projected;
+			if (diff2.LengthSquared() > thr2) { Points.RemoveAt(i); continue; }
+			cp.ConfirmedThisStep = false;   // 今フレームの確認はまだ無い
+		}
+	}
+
+	void PersistentManifold::PruneStaleDeep()
+	{
+		if (!SymmetricBreakingDistance) return;
+		const float thr = BulletManifoldPoints ? BreakingThreshold() : 0.04f;
+		for (int32 i = Points.Num() - 1; i >= 0; i--)
+		{
+			const ContactPoint& cp = Points[i];
+			if (cp.ConfirmedThisStep || cp.Distance >= -thr) continue;
+			Points.RemoveAt(i);
+		}
+	}
+
+	// btPersistentManifold の addManifoldPoint / getCacheEntry の移植。
+	void PersistentManifold::AddPointBullet(ContactPoint cp)
+	{
+		float shortest = BreakingThreshold() * BreakingThreshold();
+		int32 NearIndex = -1;
+		for (int32 i = 0; i < Points.Num(); i++)
+		{
+			const float d2 = (Points[i].LocalPointA - cp.LocalPointA).LengthSquared();
+			if (d2 < shortest) { shortest = d2; NearIndex = i; }
+		}
+		cp.ConfirmedThisStep = true;   // 今フレームのナローフェーズ由来
+		if (NearIndex >= 0)
+		{
+			cp.NormalImpulse = Points[NearIndex].NormalImpulse;
+			cp.TangentImpulse1 = Points[NearIndex].TangentImpulse1;
+			cp.TangentImpulse2 = Points[NearIndex].TangentImpulse2;
+			Points[NearIndex] = cp;
+			return;
+		}
+		if (Points.Num() < 4) { Points.Add(cp); return; }
+		Points[SortCachedPoints(cp)] = cp;
+	}
+
+	// btPersistentManifold::sortCachedPoints の移植。置換すべき index を返す。
+	//   4通りの「新点を入れて i を捨てた組」の面積 (外積長の2乗) を出し、最大の組を選ぶ。
+	//   KEEP_DEEPEST_POINT: 最深点はその case の面積を 0 のままにして候補から外す。
+	int32 PersistentManifold::SortCachedPoints(const ContactPoint& pt) const
+	{
+		int32 maxPenetrationIndex = -1;
+		float maxPenetration = pt.Distance;
+		for (int32 i = 0; i < 4; i++)
+		{
+			if (Points[i].Distance < maxPenetration)
+			{ maxPenetrationIndex = i; maxPenetration = Points[i].Distance; }
+		}
+
+		float res0 = 0.0f, res1 = 0.0f, res2 = 0.0f, res3 = 0.0f;
+		if (maxPenetrationIndex != 0)
+			res0 = Vec3::Cross(pt.LocalPointA - Points[1].LocalPointA,
+			                   Points[3].LocalPointA - Points[2].LocalPointA).LengthSquared();
+		if (maxPenetrationIndex != 1)
+			res1 = Vec3::Cross(pt.LocalPointA - Points[0].LocalPointA,
+			                   Points[3].LocalPointA - Points[2].LocalPointA).LengthSquared();
+		if (maxPenetrationIndex != 2)
+			res2 = Vec3::Cross(pt.LocalPointA - Points[0].LocalPointA,
+			                   Points[3].LocalPointA - Points[1].LocalPointA).LengthSquared();
+		if (maxPenetrationIndex != 3)
+			res3 = Vec3::Cross(pt.LocalPointA - Points[0].LocalPointA,
+			                   Points[2].LocalPointA - Points[1].LocalPointA).LengthSquared();
+
+		// btVector4::closestAxis4 = 最大成分の index。
+		int32 best = 0; float bv = res0;
+		if (res1 > bv) { bv = res1; best = 1; }
+		if (res2 > bv) { bv = res2; best = 2; }
+		if (res3 > bv) { bv = res3; best = 3; }
+		return best;
+	}
+
 	void PersistentManifold::Refresh()
 	{
+		if (BulletManifoldPoints) { RefreshBullet(); return; }
 		// 各接触点をローカル座標から現在姿勢でワールドへ再投影し、
 		// 法線方向に離れた/横ずれした点を破棄する。生存点は位置を更新。
 		for (int32 i = Points.Num() - 1; i >= 0; i--)
@@ -34,11 +140,14 @@ namespace MmdPhysics
 			cp.PositionWorldA = worldA;
 			cp.PositionWorldB = worldB;
 			cp.Distance = d;
+			cp.ConfirmedThisStep = false;
 		}
 	}
 
 	void PersistentManifold::AddPoint(ContactPoint cp)
 	{
+		if (BulletManifoldPoints) { AddPointBullet(cp); return; }
+		cp.ConfirmedThisStep = true;
 		// 近い既存点があればウォームスタート値を引き継いで置換。
 		const float mergeDist2 = 0.02f * 0.02f;
 		for (int32 i = 0; i < Points.Num(); i++)
@@ -89,8 +198,39 @@ namespace MmdPhysics
 		return sv;
 	}
 
+	float GjkEpa::BulletBreakingThresholdOf(const CollisionShape* s)
+	{
+		Vec3 h;
+		if (s->Type() == EShapeType::Sphere)
+		{
+			const float r = static_cast<const SphereShape*>(s)->Radius;
+			h = Vec3(r, r, r);
+		}
+		else if (s->Type() == EShapeType::Box)
+		{
+			h = static_cast<const BoxShape*>(s)->HalfExtents;
+		}
+		else if (s->Type() == EShapeType::Capsule)
+		{
+			const CapsuleShape* cp = static_cast<const CapsuleShape*>(s);
+			const float m = CollisionShape::BulletConvexDistanceMargin;   // 0.04
+			h = Vec3(cp->Radius + m, cp->HalfHeight() + cp->Radius + m, cp->Radius + m);
+		}
+		else
+		{
+			const float r = s->BoundingRadius();
+			h = Vec3(r, r, r);
+		}
+		return h.Length() * ContactThresholdFactor;   // disc(=|h|) * 0.02、center=0
+	}
+
 	void GjkEpa::Detect(RigidBody* a, RigidBody* b, TArray<ContactPoint>& OutPoints)
 	{
+		// ★このペアの受理閾値を先に決める。false のときは従来どおり固定 0.02。
+		PairThreshold = BulletContactThreshold
+			? FMath::Min(BulletBreakingThresholdOf(a->Shape.Get()), BulletBreakingThresholdOf(b->Shape.Get()))
+			: SpeculativeMargin;
+
 		const EShapeType ta = a->Shape->Type();
 		const EShapeType tb = b->Shape->Type();
 
@@ -142,7 +282,7 @@ namespace MmdPhysics
 		const Vec3 cB = b->WorldTransform.Origin; const float rB = static_cast<SphereShape*>(b->Shape.Get())->Radius;
 		const Vec3 dab = cB - cA; const float rsum = rA + rB;
 		const float dist2 = dab.LengthSquared();
-		const float rlim = rsum + SpeculativeMargin;
+		const float rlim = rsum + PairThreshold;
 		if (dist2 >= rlim * rlim) return;
 
 		const float dist = MSqrt(dist2);
@@ -162,7 +302,7 @@ namespace MmdPhysics
 		const Vec3 cc = ClosestPtPointSegment(sc, q0, q1);
 		const Vec3 d = cc - sc; const float rsum = sr + cr;
 		const float dist = d.Length();
-		if (dist >= rsum + SpeculativeMargin) return;
+		if (dist >= rsum + PairThreshold) return;
 
 		const Vec3 nSphereToCap = dist > ContactEps ? d / dist : Vec3::YAxis;
 		const float sep = dist - rsum;
@@ -212,7 +352,7 @@ namespace MmdPhysics
 		float sIgnored, tIgnored; Vec3 c1, c2;
 		ClosestPtSegmentSegment(a0, a1, b0, b1, sIgnored, tIgnored, c1, c2);
 		const Vec3 d = c2 - c1; const float dist = d.Length();
-		if (dist >= rsum + SpeculativeMargin) return;
+		if (dist >= rsum + PairThreshold) return;
 		const Vec3 n = dist > ContactEps ? d / dist : PerpVector(dA); // A→B、縮退は軸垂直
 		const float sep = dist - rsum;
 		Emit(a, b, OutPoints, n, sep, c1 + n * rA, c2 - n * rB);
@@ -225,7 +365,7 @@ namespace MmdPhysics
 		const Vec3 cA = a0 + dAn * Param;
 		const Vec3 cB = ClosestPtPointSegment(cA, b0, b1);
 		const Vec3 d = cB - cA; const float dist = d.Length();
-		if (dist >= rsum + SpeculativeMargin) return;
+		if (dist >= rsum + PairThreshold) return;
 		const Vec3 n = dist > ContactEps ? d / dist : PerpVector(dAn);
 		const float sep = dist - rsum;
 		Emit(a, b, OutPoints, n, sep, cA + n * rA, cB - n * rB);
@@ -233,7 +373,7 @@ namespace MmdPhysics
 
 	// 球中心(箱ローカル座標 local)・箱半サイズ he・実効半径 r から、
 	// 「箱→球」ローカル法線・分離(sep<0 で貫入)・箱表面点(ローカル)を解く。
-	// 非接触(SpeculativeMargin 超過)なら false。SphereBox / CapsuleBox の共通コア。
+	// 非接触(受理閾値 PairThreshold 超過)なら false。SphereBox / CapsuleBox の共通コア。
 	bool GjkEpa::SolveSphereBoxLocal(const Vec3& Local, const Vec3& he, float r,
 		Vec3& OutNLocalBoxToSphere, float& OutSep, Vec3& OutBoxSurfLocal)
 	{
@@ -247,7 +387,7 @@ namespace MmdPhysics
 				FMath::Clamp(Local.y, -he.y, he.y),
 				FMath::Clamp(Local.z, -he.z, he.z));
 			const Vec3 dl = Local - q; const float dist = dl.Length();
-			if (dist >= r + SpeculativeMargin)
+			if (dist >= r + PairThreshold)
 			{
 				OutNLocalBoxToSphere = Vec3::YAxis; OutSep = 0.0f; OutBoxSurfLocal = q;
 				return false;

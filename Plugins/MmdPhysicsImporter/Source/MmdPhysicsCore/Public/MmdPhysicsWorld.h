@@ -27,6 +27,7 @@ namespace MmdPhysics
 		float Friction = 0.0f;
 		float NormalImpulse = 0.0f, TangentImpulse1 = 0.0f, TangentImpulse2 = 0.0f;
 		float PushImpulse = 0.0f;      // Split Impulse の蓄積擬似インパルス (ウォームスタートしない)
+		bool UseTangent2 = true;       // 摩擦を2方向使うか (Bullet 既定は1方向)
 		PersistentManifold* Manifold = nullptr; int32 PointRef = 0; // ウォームスタート書き戻し用
 	};
 
@@ -198,6 +199,32 @@ namespace MmdPhysics
 		// 当エンジンは従来 摩擦→法線(摩擦は前反復の法線を使用)。ON で Bullet 同順(法線先)。既定 false=ビット不変。
 		bool ContactNormalBeforeFriction = false;
 
+		/**
+		 * 接触の rhs を Bullet 2.75 の **枝分かれの無い一本式** にする (★完全セット v1 で既定 ON)。
+		 *   btSequentialImpulseConstraintSolver.cpp:542-595
+		 * 従来との違いは3つ (個別フラグにはしない。1つの式なので):
+		 *   1. 分離 (dist>0) にも erp が掛かる。従来は -dist/dt で **5倍 緩かった**
+		 *   2. 貫入で PenetrationSlop を引かない (Bullet の m_linearSlop は 0)
+		 *   3. 反発を max ではなく **和** で載せる
+		 */
+		bool ContactRhsBullet = true;
+
+		/**
+		 * 摩擦の接線を Bullet 2.75 の実経路と同じ **1方向・接線速度整列** にする
+		 * (★タスク81 で既定 ON)。既定 (軸任意の直交2方向) では bulletref 比で接線が
+		 * 45.9度/51.0度 ずれ、|t| が mu*N の最大 sqrt(2)倍 (箱型の角) まで出ていた。
+		 * これにより摩擦行の warm-start は恒久的に切れる
+		 * (Bullet 2.75 の既定 solverMode に SOLVER_USE_FRICTION_WARMSTARTING が無いのと同じ状態)。
+		 */
+		bool FrictionVelocityAligned = true;
+
+		/**
+		 * 摩擦係数の合成を **積** にする (★タスク78 で既定 ON)。Bullet の btManifoldResult.cpp:26 と同じ。
+		 * 従来は相乗平均 (sqrt)。MMD/PMXe も積であることを斜面試験で実証した
+		 * (3つの摩擦対で実効 mu が一致・最大誤差 0.3%)。
+		 */
+		bool FrictionCombineMultiply = true;
+
 		// ★所有権はここが持つ。Joint / BoneLink 側は生ポインタで参照する。
 		TArray<TSharedPtr<RigidBody>> Bodies;
 		TArray<TSharedPtr<Joint>> Joints;
@@ -326,6 +353,30 @@ namespace MmdPhysics
 		void WarmStart();
 		void SolveContacts();
 		void SolveSplitImpulse();
+
+	public:
+		/**
+		 * 減衰係数の上限。★**0.999 → 1.0** (Bullet 準拠)。
+		 * Bullet 2.75 の受け口は `[0,1]` (btRigidBody.cpp:139) なので 1.0 が Bullet 準拠。
+		 * 根拠:
+		 *   ・PMX の減衰 1.0 を 0.999 に丸めると `(1-0.999)^(1/60)=0.891` で持ち越し速度が 89% 残る。
+		 *     Bullet は `(1-1.0)^dt=0` で毎ステップ消す。**丸めは減衰を弱める向き**だった。
+		 *   ・行レベル突合: 1.0 に揃えると relVelBefore の不一致 99/99 → **0 行**、力積比 中央 1.0000。
+		 *   ・参照 43 モデル中 **22 (51%)** で発火、全減衰値の **31%** が該当。
+		 * ★**撤廃ではなく上限 1.0** である理由: `d>1.0` の剛体を素通しすると `(1-1.2)^dt` が
+		 *   **NaN** になる。上限 1.0 は Bullet の受け口と一致し NaN も防ぐ。
+		 */
+		static float DampingClampMax;
+
+		/**
+		 * 姿勢積分を Bullet 2.75 btTransformUtil::integrateTransform の **指数写像** にする
+		 * (★完全セット v1 で既定 ON)。従来は 1 次の q += 0.5*w*q*dt + 正規化。
+		 */
+		static bool BulletRotationIntegration;
+
+	private:
+		/** Bullet 2.75 の ANGULAR_MOTION_THRESHOLD (= 90 度の半分)。 */
+		static constexpr float AngularMotionThreshold = 0.5f * 1.57079632679489661923f;
 
 		static float DampingFactor(float Damping, float dt);
 		static Vec3 QuatToAngularVelocity(Quat dq, float dt);

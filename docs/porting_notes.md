@@ -77,8 +77,39 @@ UE ではその前提が成り立ちません）。
 git clone --depth 1 https://github.com/masaka1024/mmd2gltf-unity-physics-importer.git .upstream/unity
 ```
 
-現在の対応コミット: `0fcbd57`（2026-08-13「sync: カプセル慣性の Bullet 準拠マージンを同梱コピーへ反映」）。
-`.upstream/` は `.gitignore` 済みです。
+現在の対応コミット: `74fcc16`（2026-09-04）。`.upstream/` は `.gitignore` 済みです。
+
+### 2026-09-05 のパリティ更新（`0fcbd57` → `74fcc16`）
+
+移植元の 6 コミット分がまるごと未移植になっていました。**うち 3 件は「揺れ物が暴れる」の原因側**です。
+既定値が変わるものだけを挙げます（診断用のフックと A/B 専用ノブは移植していません）。
+
+| 移した規則 | 既定 | 何が変わるか |
+|---|---|---|
+| `PhysicsWorld::DampingClampMax` | 0.999 → **1.0** | PMX の減衰 1.0 を 0.999 に丸めると `(1-0.999)^(1/60)=0.891` で速度が 89% 残る。**丸めが減衰を弱める向き**だった。参照 43 モデル中 22 (51%) で発火 |
+| `Joint::LeverArmGate` | **5**（新規） | `LEVER=1` の正のフィードバックを断つ。実測で毎フレーム 1.27 倍の等比で誤差が 0.05 → 340 まで走っていた |
+| `Joint::LinearLeverMode` | 0 → **1** | 線形行の A 側の腕を B 側ピボット基準に取る（Bullet 2.75 の実経路） |
+| `Joint::SpringAsMotorRow` | **true**（新規） | ばねを陽的インパルスではなくソルバのモーター行として解く。ばねだけ行き過ぎて押し戻される往復が消える |
+| `Joint::BulletLimitRowGating` | **true**（新規） | ロック軸でも変位がちょうど限界値なら行を作らない。判定の変位は Bullet と同じ式・丸め（`FromQuatBullet` / `BulletInverse`）で作る |
+| `Joint::BulletAngleConvention` | **true**（新規） | 角度の符号規約を Bullet に合わせる |
+| `Joint::AngularMixedAxes` | false → **true** | 角度行の軸を Bullet の `calculateAngleInfo` と同じ混合軸にする |
+| `PhysicsWorld::ContactRhsBullet` | **true**（新規） | 接触の rhs を Bullet の枝分かれの無い一本式へ |
+| `PhysicsWorld::FrictionVelocityAligned` | **true**（新規） | 摩擦の接線を 1 方向・接線速度整列に。摩擦行の warm-start は切れる（Bullet 2.75 の既定 solverMode に `SOLVER_USE_FRICTION_WARMSTARTING` が無いのと同じ状態） |
+| `PhysicsWorld::FrictionCombineMultiply` | **true**（新規） | 摩擦係数の合成を相乗平均から **積** へ（Bullet と同じ） |
+| `PhysicsWorld::BulletRotationIntegration` | **true**（新規） | 姿勢積分を Bullet の指数写像へ |
+| `PersistentManifold::BulletManifoldPoints` | **true**（新規） | 接触点の同一判定・4 点超過時の置換・破棄を `btPersistentManifold` の実ソースへ |
+| `PersistentManifold::SymmetricBreakingDistance` | **true**（新規） | 滑って取り残された「幻の接触点」を鮮度条件つきで破棄 |
+| `GjkEpa::BulletContactThreshold` | **true**（新規） | 接触の受理閾値を固定 0.02 から **形状サイズ比例**へ。従来は約 2 倍広く拾っていた |
+| `Joint::LockedRowImpulseBound` | 1e18 → **FLT_MAX** | Bullet の `SIMD_INFINITY`。演算結果は不変（1e17〜3e38 でビット一致）だが、1e18 は余裕が 10〜100 倍しか無い |
+| `PmxPhysicsBuilder::MaxDynamicMass` | 0 = 無効（新規） | PMX の異常質量（実例 5.56e14）に上限を掛ける安全弁。1e12 から float32 で発散する |
+
+**検証**: `MmdPhysics.Core.GlbParity` を更新後の基準 CSV に対して回し、117 剛体 / 165 ジョイントを
+300 フレームで **最大位置差 0 / 最大回転差 0**（ビット一致）。オートメーション 20 件すべて Success。
+
+移植していないもの（意図的）: 診断用の行ダンプ (`DebugRows` ほか)、A/B 専用ノブ
+（`ErrDeadband` / `BiasDeadband` / `AngularBetaScale` / `SplitCrossOnly` / `SplitChainOnly` /
+`FreezeCrossAxes` / `ContactPoolOrder` / `LeverArmProbe` / `DisableSpringClamp` / マニフォールド統計）。
+いずれも既定では動作に影響しません。
 
 ## ソルバ既定値はノードとコアで違う（意図的）
 
@@ -256,6 +287,14 @@ IA 60 秒 / `MmdPhysics.Core` 9 件（`GlbParity` のビット一致を含む）
 第一容疑は `Joint::LinearLeverMode`（既定 0 は Bullet 実機の既定 mode2 と違い、アンカーが開いたときの
 偽トルク `e×P` の出方が変わる）。`MMD_CHAIN_SOLVER` に `levermode=` / `mixedaxes=` / `jointwarm=` /
 `jointwarmang=` / `jointsfirst=` のノブだけ足してあります。
+
+> **2026-09-05 追記。** 上のパリティ更新で、この第一容疑を含む原因側が入れ替わりました
+> （`LinearLeverMode` 既定 1 + 腕長ゲート 5 / 減衰クランプ 1.0 / ばねのモーター行化）。
+> **60 秒・120 秒の漏れは測り直していません。** 併せて `FAnimNode_MmdPhysics::JointVelocityIterations`
+> の既定 **40** も見直す価値があります。これは根治前に鎖の伸びを抑えるために入れた対症療法で、
+> 移植元では同じ症状を上の 3 つで解いており既定は 0 のままです。移植元の実測では 40 は
+> **髪の深貫入を 0 → 643 件へ増やし**（参照の MMD 自身は同分母で 66 件）、釣り合うのは 12 (15 件) まででした。
+> 下げるときは鎖の伸び（`MmdPhysics.Editor.ChainStability`）と貫入の両方を測ってから決めること。
 
 ## 半透明の扱い（lilToon → UE マテリアル）
 

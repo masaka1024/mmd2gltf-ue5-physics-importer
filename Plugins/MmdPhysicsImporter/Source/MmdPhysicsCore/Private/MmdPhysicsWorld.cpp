@@ -7,6 +7,8 @@
 namespace MmdPhysics
 {
 	bool PhysicsWorld::ProfileEnabled = false;
+	float PhysicsWorld::DampingClampMax = 1.0f;              // ★Bullet 準拠 (0.999 からの訂正)
+	bool PhysicsWorld::BulletRotationIntegration = true;     // ★完全セット v1 で既定 ON
 	double PhysicsWorld::ProfBroad = 0;
 	double PhysicsWorld::ProfBuild = 0;
 	double PhysicsWorld::ProfPrepare = 0;
@@ -135,6 +137,8 @@ namespace MmdPhysics
 		BuildContactConstraints(dt);
 		if (ProfileEnabled) { ProfBuild += ProfTick(); ProfContacts += _contacts.Num(); ProfSubSteps++; }
 
+		// ばねのモーター行 (Bullet の velFactor = fps*damping/numIterations) に反復回数が要る。
+		Joint::SolverIterationsForSpring = SolverIterations;
 		for (const TSharedPtr<Joint>& j : Joints) j->Prepare(dt, UseJointSplitImpulse, UseJointWarmStart, UseJointWarmStartAngular);
 		if (ProfileEnabled) ProfPrepare += ProfTick();
 		for (const TSharedPtr<Joint>& j : Joints) j->ApplySprings(dt);
@@ -342,7 +346,7 @@ namespace MmdPhysics
 	// d=1.0 は 0 除算・完全停止を避けるためクランプする。
 	float PhysicsWorld::DampingFactor(float Damping, float dt)
 	{
-		const float d = FMath::Clamp(Damping, 0.0f, 0.999f);
+		const float d = FMath::Clamp(Damping, 0.0f, DampingClampMax);
 		// C# の Math.Pow は double。float 版 powf に落とすと最終ビットが食い違う。
 		return static_cast<float>(FMath::Pow(static_cast<double>(1.0f - d), static_cast<double>(dt)));
 	}
@@ -377,14 +381,29 @@ namespace MmdPhysics
 			}
 			t.Origin += vlin * dt;
 
-			// クォータニオン積分: q += 0.5 * w * q * dt。
 			const Vec3 w = vang;
-			const Quat spin = Quat(w.x, w.y, w.z, 0.0f) * t.Rotation;
-			t.Rotation = Quat(
-				t.Rotation.x + spin.x * 0.5f * dt,
-				t.Rotation.y + spin.y * 0.5f * dt,
-				t.Rotation.z + spin.z * 0.5f * dt,
-				t.Rotation.w + spin.w * 0.5f * dt).Normalized();
+			if (BulletRotationIntegration)
+			{
+				// Bullet 2.75 btTransformUtil::integrateTransform の指数写像。
+				// 角速度が大きいときは 1 ステップの回転量を AngularMotionThreshold で頭打ちにする。
+				float fAngle = MSqrt(w.x * w.x + w.y * w.y + w.z * w.z);
+				if (fAngle * dt > AngularMotionThreshold) fAngle = AngularMotionThreshold / dt;
+				const float sc = fAngle < 0.001f
+					? 0.5f * dt - (dt * dt * dt) * 0.020833333333f * fAngle * fAngle
+					: MSin(0.5f * fAngle * dt) / fAngle;
+				const Quat dorn(w.x * sc, w.y * sc, w.z * sc, MCos(fAngle * dt * 0.5f));
+				t.Rotation = (dorn * t.Rotation).Normalized();
+			}
+			else
+			{
+				// 従来: クォータニオン積分 q += 0.5 * w * q * dt。
+				const Quat spin = Quat(w.x, w.y, w.z, 0.0f) * t.Rotation;
+				t.Rotation = Quat(
+					t.Rotation.x + spin.x * 0.5f * dt,
+					t.Rotation.y + spin.y * 0.5f * dt,
+					t.Rotation.z + spin.z * 0.5f * dt,
+					t.Rotation.w + spin.w * 0.5f * dt).Normalized();
+			}
 
 			b->WorldTransform = t;
 			b->UpdateInertiaWorld();
@@ -475,6 +494,9 @@ namespace MmdPhysics
 			GjkEpa::Detect(a, b, _detectBuffer);
 			for (int32 di = 0; di < _detectBuffer.Num(); di++)
 				m->AddPoint(_detectBuffer[di]);
+			// ★Refresh → Detect → AddPoint のあとに深い側の幻を掃除する
+			//   (このフレームのナローフェーズに確認されなかった点だけが対象)。
+			m->PruneStaleDeep();
 		}
 		// 消えたペアを掃除。
 		if (_manifolds.Num() > seen.Num())
@@ -524,11 +546,29 @@ namespace MmdPhysics
 				// 接線基底。
 				Vec3 t1, t2;
 				BuildTangentBasis(n, t1, t2);
+				bool bUseT2 = true;
+				if (FrictionVelocityAligned)
+				{
+					// Bullet convertContact: dir1 = 正規化(vel - n*(n·vel))。接線速度が無ければ任意基底。
+					const Vec3 vrel = b->VelocityAtPoint(cp.PositionWorldB) - a->VelocityAtPoint(cp.PositionWorldA);
+					const Vec3 lat = vrel - n * vrel.Dot(n);
+					const float l2 = lat.LengthSquared();
+					// フォールバック閾値は Bullet の SIMD_EPSILON (=FLT_EPSILON)。
+					//   btSequentialImpulseConstraintSolver.cpp:619 `lat_rel_vel > SIMD_EPSILON`。
+					//   1e-12 は |lat| にして 340倍 きつく、接線速度がほぼ無い接触でも
+					//   数値ノイズから向きを作ってしまう。Bullet はそこを btPlaneSpace1
+					//   (法線だけから決まる安定な基底) へ落とす。
+					if (l2 > 1.1920929e-07f) { t1 = lat / MSqrt(l2); t2 = Vec3::Cross(t1, n); }
+					bUseT2 = false;   // Bullet 既定は摩擦1方向
+				}
 
 				ContactConstraint cc;
 				cc.A = a; cc.B = b; cc.RelA = rA; cc.RelB = rB;
 				cc.Normal = n; cc.Tangent1 = t1; cc.Tangent2 = t2;
-				cc.Friction = MSqrt(FMath::Max(0.0f, a->Friction) * FMath::Max(0.0f, b->Friction));
+				cc.UseTangent2 = bUseT2;
+				cc.Friction = FrictionCombineMultiply
+					? FMath::Max(0.0f, a->Friction) * FMath::Max(0.0f, b->Friction)          // Bullet: 積
+					: MSqrt(FMath::Max(0.0f, a->Friction) * FMath::Max(0.0f, b->Friction));
 				cc.NormalMass = EffectiveMass(a, b, rA, rB, n);
 				cc.TangentMass1 = EffectiveMass(a, b, rA, rB, t1);
 				cc.TangentMass2 = EffectiveMass(a, b, rA, rB, t2);
@@ -542,7 +582,34 @@ namespace MmdPhysics
 				const float rest = MSqrt(FMath::Max(0.0f, a->Restitution) * FMath::Max(0.0f, b->Restitution));
 				const float restBias = (-relN > RestitutionThreshold) ? rest * -relN : 0.0f;
 
-				if (cp.Distance <= 0.0f)
+				if (ContactRhsBullet)
+				{
+					// ★Bullet 2.75 の **枝分かれの無い一本式** をそのまま使う。
+					//   btSequentialImpulseConstraintSolver.cpp:542-595
+					//     penetration     = cp.getDistance() + m_linearSlop   (m_linearSlop 既定 0)
+					//     positionalError = -penetration * m_erp / dt         (m_erp = BaumgarteFactor)
+					//     velocityError   = restitution - rel_vel
+					//     m_rhs           = (positionalError + velocityError) * jacDiagABInv
+					//   当エンジンの求解は dPn = (NormalBias - relN) * NormalMass なので、
+					//   NormalBias = positionalError + restitution と置けば Bullet と厳密に同じ式になる。
+					//   ★従来との違いは3つ (個別フラグにはしない。1つの式なので):
+					//     1. 分離 (dist>0) にも erp が掛かる。従来は -dist/dt で **5倍 緩かった**
+					//     2. 貫入で PenetrationSlop を引かない (Bullet の m_linearSlop は 0)
+					//     3. 反発を max ではなく **和** で載せる
+					const float penB = cp.Distance;                       // + m_linearSlop (=0)
+					const float posErr = -penB * BaumgarteFactor / dt;
+					if (UseSplitImpulse && penB <= SplitImpulsePenetrationThreshold)
+					{
+						cc.NormalBias = restBias;                   // 実速度側: 反発のみ
+						cc.PushBias = posErr;                       // 擬似速度側: 位置補正
+					}
+					else
+					{
+						cc.NormalBias = posErr + restBias;
+						cc.PushBias = 0.0f;
+					}
+				}
+				else if (cp.Distance <= 0.0f)
 				{
 					// 貫入: Baumgarte 位置補正 + 反発。
 					const float pen = -cp.Distance - PenetrationSlop;
@@ -603,8 +670,13 @@ namespace MmdPhysics
 			if (c.Manifold == nullptr || c.PointRef >= c.Manifold->Points.Num()) continue;
 			ContactPoint& cp = c.Manifold->Points[c.PointRef];
 			cp.NormalImpulse = c.NormalImpulse;
-			cp.TangentImpulse1 = c.TangentImpulse1;
-			cp.TangentImpulse2 = c.TangentImpulse2;
+			// ★Bullet は SOLVER_USE_FRICTION_WARMSTARTING が無いので
+			//   接線力積を接触点へ書き戻さない (恒久的に 0 のまま)。
+			if (!FrictionVelocityAligned)
+			{
+				cp.TangentImpulse1 = c.TangentImpulse1;
+				cp.TangentImpulse2 = c.TangentImpulse2;
+			}
 			if (DebugContacts != nullptr)
 			{
 				FMmdDebugContact Rec;
@@ -620,6 +692,14 @@ namespace MmdPhysics
 		for (int32 i = 0; i < _contacts.Num(); i++)
 		{
 			ContactConstraint& c = _contacts[i];
+			// ★Bullet 2.75 の既定 solverMode は `SOLVER_USE_WARMSTARTING | SOLVER_SIMD`
+			//   (btContactSolverInfo.h:80) で、**SOLVER_USE_FRICTION_WARMSTARTING が入っていない**。
+			//   したがって Bullet は摩擦行を warm-start しない
+			//   (btSequentialImpulseConstraintSolver.cpp:660 の門が閉じ、1102 の書き戻しも行われない)。
+			//   ★これが FRICALIGN と組むと**エネルギーを注ぎ込む**: 摩擦方向は毎フレーム
+			//     相対速度から作り直されるので、前フレームの力積を **別の向き** に再適用してしまう。
+			//   摩擦の向きが幾何基底で安定している FRICALIGN 無しでは表面化しない。
+			if (FrictionVelocityAligned) { c.TangentImpulse1 = 0.0f; c.TangentImpulse2 = 0.0f; }
 			// Bullet同様、蓄積インパルスに係数を掛けてから適用+アキュムレータ初期値にする(0.85時)。
 			if (wf != 1.0f) { c.NormalImpulse *= wf; c.TangentImpulse1 *= wf; c.TangentImpulse2 *= wf; }
 			const Vec3 P = c.Normal * c.NormalImpulse
@@ -642,7 +722,7 @@ namespace MmdPhysics
 			{
 				// 従来: 摩擦(前反復の法線で上限) → 法線。
 				SolveFriction(c, a, b, c.Tangent1, c.TangentMass1, c.TangentImpulse1);
-				SolveFriction(c, a, b, c.Tangent2, c.TangentMass2, c.TangentImpulse2);
+				if (c.UseTangent2) SolveFriction(c, a, b, c.Tangent2, c.TangentMass2, c.TangentImpulse2);
 				SolveNormal(c, a, b);
 			}
 			else
@@ -650,7 +730,7 @@ namespace MmdPhysics
 				// Bullet同順: 法線 → 摩擦(同反復の法線で上限)。
 				SolveNormal(c, a, b);
 				SolveFriction(c, a, b, c.Tangent1, c.TangentMass1, c.TangentImpulse1);
-				SolveFriction(c, a, b, c.Tangent2, c.TangentMass2, c.TangentImpulse2);
+				if (c.UseTangent2) SolveFriction(c, a, b, c.Tangent2, c.TangentMass2, c.TangentImpulse2);
 			}
 		}
 	}

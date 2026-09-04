@@ -5,6 +5,17 @@
 
 namespace MmdPhysics
 {
+	float PmxPhysicsBuilder::MaxDynamicMass = 0.0f;   // 既定 OFF (シーン側から立てる)
+	int32 PmxPhysicsBuilder::ClampedMassCount = 0;
+
+	float PmxPhysicsBuilder::ClampMass(float Mass)
+	{
+		if (MaxDynamicMass <= 0.0f) return Mass;          // 0 で無効化 (A/B 用)
+		if (!(Mass > MaxDynamicMass)) return Mass;        // NaN はここを通さない
+		ClampedMassCount++;
+		return MaxDynamicMass;
+	}
+
 	TSharedPtr<PmxPhysicsBuilder> PmxPhysicsBuilder::Build(const TSharedPtr<PmxPhysicsModel>& Model)
 	{
 		TSharedPtr<PmxPhysicsBuilder> b = MakeShared<PmxPhysicsBuilder>();
@@ -35,7 +46,7 @@ namespace MmdPhysics
 
 			body->KinematicTarget = body->WorldTransform;
 			// ボーン追従は質量 0 (kinematic)、それ以外は PMX 質量。
-			body->SetMassProps(body->Mode == EPhysicsMode::BoneFollow ? 0.0f : rb.Mass);
+			body->SetMassProps(body->Mode == EPhysicsMode::BoneFollow ? 0.0f : ClampMass(rb.Mass));
 
 			World.AddBody(body);
 			Bodies.Add(body.Get());

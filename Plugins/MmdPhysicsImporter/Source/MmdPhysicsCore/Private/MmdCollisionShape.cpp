@@ -6,5 +6,6 @@
 namespace MmdPhysics
 {
 	// A/B 検証用に可変のまま残す。0 にすると 2026-08-13 以前の値を再現できる。
+	bool CollisionShape::BulletShapeMargin = false;
 	float CapsuleShape::InertiaMargin = 0.04f;
 }

@@ -116,6 +116,25 @@ namespace MmdPhysics
 			return (Index >= 0 && Index < Bodies.Num()) ? Bodies[Index] : nullptr;
 		}
 
+		/**
+		 * PMX の異常な質量を、float32 のソルバが壊れない範囲へ丸める。0 で無効 (既定)。
+		 *
+		 * 背景 (すべて実測): あるモデルは 34リンクの鎖に **質量 5.56e14 → 0.1 (毎段 ÷3)** を持つ。
+		 * 実機の再生でこの鎖が発散し、画面外まで飛んだ。ヘッドレスで切り分けたところ:
+		 *   ・接触を止めても完全に同一 → 接触は無関係。ジョイントソルバ由来
+		 *   ・反復 10/20/40・サブステップ 2/4 で変わらない → 収束不足ではない
+		 *   ・減衰 0.1/0.5/0.9 に変えても変わらない → 減衰は無関係
+		 *   ・**質量に上限を掛けると完全に発散しない**
+		 * 上限の掃引: **1e11 までは無事、1e12 から発散**する (float32 の限界域)。
+		 * 参照スイート 35 モデルの動的質量の最大は 30 なので 1e3 はその 33 倍 = 通常モデルでは
+		 * 一度も発動しない。上げすぎると効かない (1e6 では静止時の拘束違反が 1.5 と悪化)。
+		 */
+		static float MaxDynamicMass;
+		/** 診断用: 何体丸めたか。 */
+		static int32 ClampedMassCount;
+
+		static float ClampMass(float Mass);
+
 		static RigidTransform ComputeOffset(const PmxPhysicsModel& Model, const PmxRigidBody& rb);
 		static TSharedPtr<CollisionShape> CreateShape(const PmxRigidBody& rb);
 		static Quat EulerQ(const Vec3& e);

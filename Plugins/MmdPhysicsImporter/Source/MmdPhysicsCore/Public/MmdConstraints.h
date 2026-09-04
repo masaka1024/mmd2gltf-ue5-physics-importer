@@ -98,6 +98,63 @@ namespace MmdPhysics
 		//     totalDist を質量比 factA=miB/(miA+miB) で分配。hasStaticBody&&!rotAllowed で fact スケール。
 		static int32 LinearLeverMode;
 
+		/**
+		 * 腕長ゲート。`LinearLeverMode=1` の潜在不安定だけを止める。0 で完全に無効 = ビット不変。
+		 *
+		 * `LEVER=1` は Bullet 2.75 の実経路そのままで、線形行の A 側の腕を **B 側ピボット基準**
+		 * にとる (btGeneric6DofConstraint.cpp:781-792)。このためアンカー誤差が開くと腕が
+		 * そのぶん伸び、実効質量の分母が腕の 2乗 で効くので行が急速に弱る。
+		 * 弱った行は誤差をさらに開かせるので **正のフィードバック** になり、実測では
+		 * 毎フレーム約 1.27 倍の等比で誤差が 0.05 → 340 まで走った (もみあげの房が脱落)。
+		 *
+		 * ゲートは「アンカー誤差がこのジョイント自身の腕の長さに対して大きすぎるとき」だけ、
+		 * その行の A 側の腕を `LEVER=0` と同じ **自分自身のアンカー** (rA) へ落とす。
+		 * 閾値を絶対長ではなく (|rA|+|rB|) 比にしてあるのは、モデルのスケールに依らせないため。
+		 * 閾値 5 は実測分布から決めた (健全時の最大 2.630 / 発散時 12758)。
+		 *
+		 * **これは Bullet に無い規則である。** 2.75 に忠実であることが参照実装には存在しない
+		 * 破綻を生む事例なので、出力を優先する側で入れている。
+		 * Bullet 自身も 2.8x でこの箇所を作り変えている (D6_USE_FRAME_OFFSET = LEVER=2)。
+		 */
+		static float LeverArmGate;
+		static int64 LeverArmGateHits;
+
+		/**
+		 * 角度の符号規約を Bullet に合わせる (★完全セット v1 で既定 ON)。
+		 * 相対姿勢に共役を掛けて Euler を取り、角度行の軸を反転する。
+		 */
+		static bool BulletAngleConvention;
+
+		/**
+		 * ばねを陽的インパルスではなく **ソルバのモーター行** として解く (★既定 ON)。
+		 * Bullet の 6DOF ばねは enableSpring した軸の m_targetVelocity / m_maxMotorForce を
+		 * 毎ステップ書き換えてモーター行として解く。陽的に後から足す従来経路と違い、
+		 * 他の行と同じ反復の中で釣り合うので「ばねだけ行き過ぎて次の反復で押し戻される」往復が消える。
+		 */
+		static bool SpringAsMotorRow;
+
+		/**
+		 * リミット行を立てるかどうかを Bullet の testLimitValue で判定する (★完全セット v1 で既定 ON)。
+		 * ロック軸でも変位がちょうど限界値なら行を作らない。
+		 * 判定に使う変位は Bullet と同じ式・同じ丸め (FromQuatBullet / BulletInverse) で作る。
+		 */
+		static bool BulletLimitRowGating;
+
+		/** ばねのモーター行が想定する反復数。0 なら 10 (PhysicsWorld が毎ステップ書き込む)。 */
+		static int32 SolverIterationsForSpring;
+
+		/** Bullet 2.75 の 6DOF ばねの減衰係数 (btGeneric6DofSpringConstraint)。つまみにしない。 */
+		static constexpr float BulletSpringDamping = 1.0f;
+
+		/**
+		 * ロック行/リミット行のインパルス上下限。**Bullet と同じ SIMD_INFINITY (=FLT_MAX)**。
+		 * 出典: btGeneric6DofConstraint.cpp:827-842 / btScalar.h:280 `#define SIMD_INFINITY FLT_MAX`。
+		 * ★従来の有限代用 1e18 から訂正した。**演算結果は不変**
+		 *   (1e17〜3e38 で出力ビット一致。1e16 で初めて動く = 実インパルスの最大は 1e16〜1e17)。
+		 *   1e18 のままだと余裕が 10〜100倍しか無く、さらに重いモデルで黙ってクランプが効き始める。
+		 */
+		static float LockedRowImpulseBound;
+
 	private:
 		// 内部状態。
 		TArray<ConstraintRow> _rows;
@@ -167,5 +224,15 @@ namespace MmdPhysics
 
 		static float ClampSpringImpulse(float Impulse, float Err, float InvMEff, float InvDt);
 		static float ClampToLimit(float v, float lo, float hi);
+
+		/** Bullet 2.75 testLimitValue 相当。0 = 行を作らない / 1 = 上限側 / 2 = 下限側。 */
+		static int32 TestLimitValue(float v, float lo, float hi);
+		/** Bullet 2.75 btRotationalLimitMotor の m_limitSoftness 相当。 */
+		static float MotorFactor(float pos, float lowLim, float uppLim, float vel, float timeFact);
+		/** Bullet 2.75 matrixToEulerXYZ の移植 (bBulletElem で列優先の添字に合わせる)。 */
+		static Vec3 ToEulerXYZBullet(const Matrix3x3& m, bool bBulletElem);
+
+		void AddSpringMotorRow(bool bAngular, int32 i, const Vec3& Axis, float cur, float lo, float hi,
+			const Vec3& rA, const Vec3& rB, float invDt);
 	};
 }

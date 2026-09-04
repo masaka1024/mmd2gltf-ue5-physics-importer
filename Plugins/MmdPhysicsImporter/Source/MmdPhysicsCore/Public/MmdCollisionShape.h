@@ -33,6 +33,27 @@ namespace MmdPhysics
 		/** 衝突マージン。Bullet 既定に合わせ既定値を持つ。 */
 		float Margin = 0.04f;
 
+		/**
+		 * Bullet 2.75 `CONVEX_DISTANCE_MARGIN` (btCollisionMargin.h:21)。
+		 * btConvexInternalShape の既定マージンで、箱もカプセルもこの値を使う。つまみにしない。
+		 */
+		static constexpr float BulletConvexDistanceMargin = 0.04f;
+
+		/**
+		 * 形状マージンを Bullet 2.75 と同じ取り方にする (既定 false = ビット不変)。
+		 * **形状の構築時に読む**ので、PmxPhysicsBuilder::Build より前に立てること。
+		 *
+		 *   箱     : 当方 `min(半幅)*0.04` / Bullet 2.75 は **0.04 固定**。
+		 *            2.75 に `setSafeMargin` は存在しない (後年の Bullet で追加されたもの)。
+		 *            半幅 0.2 のスカート箱で 0.008 vs 0.04 = 5倍の差。
+		 *            ※2.75 は半幅 < 0.04 の箱でコアが負になるが、退化形状を作らないため
+		 *              ここでは半幅未満へクランプする。
+		 *   カプセル: 当方 `Margin = 半径` (コア = 線分) / Bullet は 0.04 でコアを
+		 *            線分 + (半径 - 0.04) にする。外形はどちらも 線分+半径 で一致し、
+		 *            差が出るのは getMargin() を使う量 (GJK の探索距離・AABB・受理閾値) だけ。
+		 */
+		static bool BulletShapeMargin;
+
 		/** ローカル座標系での support point (方向 dir で最も遠い点)。 */
 		virtual Vec3 LocalSupport(const Vec3& Dir) const = 0;
 
@@ -83,7 +104,10 @@ namespace MmdPhysics
 		explicit BoxShape(const Vec3& InHalfExtents)
 			: HalfExtents(InHalfExtents)
 		{
-			Margin = FMath::Min(FMath::Min(InHalfExtents.x, InHalfExtents.y), InHalfExtents.z) * 0.04f;
+			const float MinHalf = FMath::Min(FMath::Min(InHalfExtents.x, InHalfExtents.y), InHalfExtents.z);
+			Margin = BulletShapeMargin
+				? FMath::Min(BulletConvexDistanceMargin, MinHalf * 0.999f)   // 2.75 は 0.04 固定 (クランプは退化よけ)
+				: MinHalf * 0.04f;
 		}
 
 		virtual EShapeType Type() const override { return EShapeType::Box; }
@@ -127,7 +151,9 @@ namespace MmdPhysics
 			: Radius(InRadius)
 			, Height(InHeight)
 		{
-			Margin = InRadius;
+			// 当方はコア=線分なので Margin=半径。Bullet 2.75 はコアを線分+(半径-0.04) にして Margin=0.04。
+			// どちらも外形は 線分+半径 で同じ。
+			Margin = BulletShapeMargin ? FMath::Min(BulletConvexDistanceMargin, InRadius) : InRadius;
 		}
 
 		virtual EShapeType Type() const override { return EShapeType::Capsule; }
@@ -147,10 +173,15 @@ namespace MmdPhysics
 
 		virtual Vec3 LocalSupport(const Vec3& Dir) const override
 		{
-			// 線分の端点 (半径はマージンで付与)。
-			return Dir.y >= 0
-				? Vec3(0, HalfHeight(), 0)
-				: Vec3(0, -HalfHeight(), 0);
+			// 線分の端点。半径のうち Margin ぶんは LocalSupportWithMargin が足すので、
+			// ここでは (半径 - Margin) だけ膨らませる。
+			// 既定は Margin == Radius なので膨らみゼロ = 従来と完全に同一 (ビット不変)。
+			const Vec3 Seg = Dir.y >= 0 ? Vec3(0, HalfHeight(), 0) : Vec3(0, -HalfHeight(), 0);
+			const float Core = Radius - Margin;
+			if (Core <= 0.0f) return Seg;
+			const float Len2 = Dir.LengthSquared();
+			if (Len2 < 1e-12f) return Seg;
+			return Seg + Dir * (Core / MSqrt(Len2));
 		}
 
 		virtual Vec3 CalculateLocalInertia(float Mass) const override
