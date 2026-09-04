@@ -199,10 +199,8 @@ bool FMmdChainStabilityTest::RunTest(const FString& Parameters)
 	const FString TraceJointSub = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_CHAIN_TRACE_JOINTS"));
 	const MmdPhysics::PmxPhysicsBuilder* DiagBuilder = nullptr;
 	FAnimNode_MmdPhysics* DiagNode = nullptr;
-	if (!TraceJointSub.IsEmpty()
-		|| !FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_CHAIN_SOLVER")).IsEmpty()
-		|| !FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_CHAIN_DISABLE_JOINTS")).IsEmpty()
-		|| !FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_CHAIN_TRACE_CONTACTS")).IsEmpty())
+	// ★物理ノードは**常に**取りに行く。診断フックだけでなく貫入の集計にも要るため
+	//   (下の「貫入の要約」を参照)。取れなくても致命ではないので警告に留める。
 	{
 		UAnimInstance* Post = Comp->GetPostProcessInstance();
 		IAnimClassInterface* AnimClass = Post != nullptr ? IAnimClassInterface::GetFromClass(Post->GetClass()) : nullptr;
@@ -296,11 +294,24 @@ bool FMmdChainStabilityTest::RunTest(const FString& Parameters)
 	//   その名前を含む剛体の接触 (相手 / 距離 / 法線インパルス) を 1 秒ごとに出す。
 	const FString TraceContactSub = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_CHAIN_TRACE_CONTACTS"));
 	TArray<MmdPhysics::FMmdDebugContact> ContactSink;
-	if (!TraceContactSub.IsEmpty() && DiagBuilder != nullptr)
+	if (DiagBuilder != nullptr)
 	{
+		// ★接触は常に集める。鎖の伸びと**貫入**はトレードオフなので、
+		//   片方だけ見て設定を決めると必ずもう片方を壊す
+		//   (ジョイントの反復を増やすと鎖は締まるが髪が体へ潜る)。
+		//   同じ 1 回の再生で両方を出す。
 		const_cast<MmdPhysics::PmxPhysicsBuilder*>(DiagBuilder)->World.DebugContacts = &ContactSink;
-		AddInfo(TEXT("接触診断: フックを付けました。"));
+		if (!TraceContactSub.IsEmpty()) AddInfo(TEXT("接触診断: フックを付けました。"));
 	}
+
+	// 貫入の集計。しきい値 0.5 PMX単位は移植元の忠実度ハーネスと同じ分母
+	//   (参照の MMD 自身も 0 ではないので「深貫入の件数」で比べる)。
+	//   イベント数はサブステップごとに数えるため、設定間の比較にだけ意味がある。
+	constexpr double DeepPenThreshold = 0.5;
+	int64 DeepPenEvents = 0;
+	int64 ContactEvents = 0;
+	double WorstPen = 0.0;          // 最も深い貫入 (負の距離)
+	FString WorstPenPair;
 	// PMX 単位 -> cm。
 	const double ToCm = UnitScale * 100.0;
 
@@ -324,6 +335,18 @@ bool FMmdChainStabilityTest::RunTest(const FString& Parameters)
 	{
 		ContactSink.Reset();
 		Step(Dt);
+		// 貫入の集計 (毎ステップ)。
+		for (const MmdPhysics::FMmdDebugContact& C : ContactSink)
+		{
+			ContactEvents++;
+			if (C.Dist >= 0.0f) continue;
+			if (C.Dist < WorstPen)
+			{
+				WorstPen = C.Dist;
+				WorstPenPair = FString::Printf(TEXT("%s <-> %s"), *C.A, *C.B);
+			}
+			if (C.Dist < -DeepPenThreshold) DeepPenEvents++;
+		}
 		if (!TraceContactSub.IsEmpty() && (s % TraceEvery) == 0)
 		{
 			// 同じ接触が毎サブステップ積まれるので、相手ごとに最大の法線インパルスだけ残す。
@@ -415,6 +438,17 @@ bool FMmdChainStabilityTest::RunTest(const FString& Parameters)
 		const int32 c = Order[k];
 		AddInfo(FString::Printf(TEXT("  %-20s 最大 %.2f 倍 / 最小 %.2f 倍 (参照 %.2f cm)"),
 			*Chain[c].Name, MaxRatio[c], MinRatio[c], Chain[c].RefLen));
+	}
+
+	// 貫入の要約。鎖の伸びと**同じ 1 回の再生**から出しているので、設定を動かしたときの
+	// トレードオフ (鎖が締まる / 髪が体へ潜る) をそのまま比べられる。
+	if (DiagBuilder != nullptr)
+	{
+		AddInfo(FString::Printf(
+			TEXT("貫入: 深貫入(>%.1f PMX単位) %lld 件 / 接触 %lld 件 (%.3f%%) / 最深 %.3f (%.2f cm) %s"),
+			DeepPenThreshold, DeepPenEvents, ContactEvents,
+			ContactEvents > 0 ? 100.0 * DeepPenEvents / ContactEvents : 0.0,
+			WorstPen, WorstPen * ToCm, *WorstPenPair));
 	}
 
 	// ★しきい値。物理焼きの並進 (剛体が付いたボーンの押し出し) は正当なデータなので
