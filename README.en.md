@@ -1,5 +1,34 @@
 # mmd2gltf UE5 Physics Importer
 
+<!-- mmd2gltf-ecosystem:start -->
+> **The mmd2gltf ecosystem** — Convert an MMD model (PMX/VMD) to `.glb` once, and bring it into **Unity, Unreal Engine 5, or Blender** as is, with physics (secondary motion) and materials (toon/sphere). MMD-specific data that glTF cannot express is kept under `extras.mmd` as the original values, and each importer reads it to rebuild the model on the engine side.
+>
+> ```
+> PMX / VMD
+>    │  convert (mmd2gltf-gui or mmd2gltf-cs)
+>    ▼
+> .glb + extras.mmd   ← converted only once
+>    │
+>    ├─▶ Unity   … mmd2gltf-unity-physics-importer
+>    ├─▶ UE5     … mmd2gltf-ue5-physics-importer
+>    └─▶ Blender … mmd2gltf-blender-physics-importer
+> ```
+>
+> | Goal | Use |
+> |---|---|
+> | Convert first (Windows EXE available) | [mmd2gltf-gui](https://github.com/masaka1024/mmd2gltf-gui) — Python. GUI / CLI |
+> | Convert (C#, with built-in physics bake) | [mmd2gltf-cs](https://github.com/masaka1024/mmd2gltf-cs) — same output format as gui; bakes secondary motion with the in-house engine |
+> | Run it in Unity | [mmd2gltf-unity-physics-importer](https://github.com/masaka1024/mmd2gltf-unity-physics-importer) — Editor extension. Bundled Bullet-compatible engine (no PhysX) |
+> | Run it in Unreal Engine 5 | [mmd2gltf-ue5-physics-importer](https://github.com/masaka1024/mmd2gltf-ue5-physics-importer) — C++ plugin. C++ port of the same engine (no Chaos) |
+> | Run it in Blender | `mmd2gltf-blender-physics-importer` (coming soon) — Add-on. Wires up Blender's built-in Bullet |
+> | (Library) the physics engine itself | [mmd2gltf-cs-physics](https://github.com/masaka1024/mmd2gltf-cs-physics) — Bullet 2.75-compatible engine used by cs / Unity / UE5. Not used directly |
+> | (Separate route) export glTF/FBX from Blender's mmd_tools | [mmd-to-gltf-exporter](https://github.com/masaka1024/mmd-to-gltf-exporter) — no `extras.mmd` (physics is not rebuilt) |
+>
+> Secondary-motion behavior matches between Unity and UE5 because they share the same engine. The Blender version drives Blender's built-in Bullet, so the motion is close but not identical.
+>
+> **This repository**: The side that brings the `.glb` into **Unreal Engine 5**.
+<!-- mmd2gltf-ecosystem:end -->
+
 A **C++ editor plugin for Unreal Engine 5** that reads MMD-specific physics data
 (rigid bodies and joints) from the `extras.mmd` block of a `.glb` produced by
 [`mmd2gltf-gui`](https://github.com/masaka1024/mmd2gltf-gui), and drives the bones of a
