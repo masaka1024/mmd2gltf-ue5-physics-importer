@@ -263,6 +263,16 @@ Derivation and measured validation: [docs/coordinate_transform.md](docs/coordina
   promotes only the semi-transparent decals stuck onto skin — eyebrows, eyelashes, forehead shadow —
   which is safe because the opaque skin underneath writes the depth. The measured values behind that
   classifier are in [docs/porting_notes.md](docs/porting_notes.md).
+- **No cap is placed on texture resolution.** The plugin only touches compression settings (fixing
+  settings that cannot be read as colour, and promoting materials that use alpha to `TC_BC7`); it
+  never sets `MaxTextureSize`. A model carrying 4096x4096 textures is imported at 4096.
+  **This is fine for PC, but watch out when building for mobile or VR** — even BC-compressed,
+  4096x4096 is about 28 MB per texture with mips, so a handful of models will exhaust texture
+  memory. In UE the cap belongs in the **project's Texture LOD Group / Device Profile**, not in the
+  importer, so set it there. Note that **compression itself always applies** — UE's importers give
+  textures BC compression by default, so nothing is left uncompressed (the Unity version had a path
+  where this was bypassed, leaving 170 MB uncompressed ARGB32 textures).
+
 - **Morph (facial expression) animation is re-read from the `.glb` by the plugin.** UE 5.5's
   Interchange builds the track for a glTF `weights` channel **using the mesh node as its skeleton**
   (`ProcessMorphTargetAnimations` in `InterchangeGltfAnimation.cpp`), so it never merges with the
