@@ -15,7 +15,7 @@
 //   なので、取り込み経路は混ざらないまま駆動経路だけを比較できる (ApplyDrive を参照)。
 //
 // 使い方:
-//   dotnet run --project Tools/CsReference -- <glb> <frames> <out.csv> [--per-frame] [--drive]
+//   dotnet run --project Tools/CsReference -- <glb> <frames> <out.csv> [--per-frame] [--drive] [--playback]
 //
 // --per-frame を付けると、最終フレームだけでなく **毎フレーム** の全剛体姿勢を出す
 // (ヘッダが "frame," で始まる)。UE 側の GlbParity はこの形式を自動判別して毎フレーム
@@ -46,6 +46,7 @@ internal static class Program
         string outPath = args[2];
         bool perFrame = Array.IndexOf(args, "--per-frame") >= 0;
         bool drive = Array.IndexOf(args, "--drive") >= 0;
+        bool playback = Array.IndexOf(args, "--playback") >= 0;
 
         var model = GlbPhysicsReader.LoadFile(glbPath, out float unitScale, out List<string> warnings);
         foreach (var w in warnings) Console.Error.WriteLine("[warn] " + w);
@@ -55,6 +56,8 @@ internal static class Program
         var builder = PmxPhysicsBuilder.Build(model);
         Console.Error.WriteLine($"built bodies={builder.Bodies.Count} joints={builder.World.Joints.Count} " +
                                 $"pairs={builder.World.DebugCollisionPairCount}");
+
+        if (playback) ApplyPlaybackSettings(builder.World);
 
         var sb = new StringBuilder();
         sb.Append(perFrame ? "frame,index,name,px,py,pz,qx,qy,qz,qw\n"
@@ -91,6 +94,36 @@ internal static class Program
             ? $"wrote {builder.Bodies.Count} bodies x {frames} frames -> {outPath}"
             : $"wrote {builder.Bodies.Count} rows -> {outPath}");
         return 0;
+    }
+
+    // -----------------------------------------------------------------------
+    // 再生時のソルバ設定 (--playback)
+    //
+    // ★コア既定と再生時の設定は大きく違う。パリティはこれまでコア既定でしか比べておらず、
+    //   **実際に再生されるときの構成は一度も比較されていなかった**。
+    //   値は UE 側 FAnimNode_MmdPhysics の既定 (= 再生時に使われる値) に合わせてある。
+    //
+    //              コア既定          再生時 (ノード既定)
+    //   SolverIterations        10        10
+    //   JointVelocityIterations  0        40
+    //   JointMaxCorrectionVel    0        30
+    //   SubSteps                 4         2
+    //   FixedTimeStep         1/30      1/60
+    //   UseSplitImpulse      false      true
+    //   UseJointSplitImpulse false      true
+    //
+    // ★UE 側の ApplyPlaybackSettings と**同じ値にすること**。片方だけ変えるとパリティは
+    //   落ちるが、原因が移植漏れなのか設定の食い違いなのか分からなくなる。
+    // -----------------------------------------------------------------------
+    private static void ApplyPlaybackSettings(PhysicsWorld w)
+    {
+        w.SolverIterations = 10;
+        w.JointVelocityIterations = 40;
+        w.JointMaxCorrectionVel = 30f;
+        w.SubSteps = 2;
+        w.FixedTimeStep = 1f / 60f;
+        w.UseSplitImpulse = true;
+        w.UseJointSplitImpulse = true;
     }
 
     // -----------------------------------------------------------------------

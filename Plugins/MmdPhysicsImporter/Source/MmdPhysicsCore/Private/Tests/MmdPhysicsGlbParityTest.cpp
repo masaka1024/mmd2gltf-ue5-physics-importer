@@ -45,6 +45,13 @@
 //   アニメではないので取り込み経路は混ざらず、駆動経路だけを比較できる。
 //   基準 CSV も `--drive` を付けて作ること:
 //     dotnet run --project Tools/CsReference -c Release -- <glb> 60 out/ia_60_drive_pf.csv --per-frame --drive
+//
+// ★再生時のソルバ設定でのパリティ (MMD_PARITY_PLAYBACK=1):
+//   コア既定 (SubSteps=4 / FixedTimeStep=1/30 / jointiter=0 / split 両 false) と
+//   再生時 (SubSteps=2 / 1/60 / jointiter=40 / maxcorr=30 / split 両 true) は別物で、
+//   **実際に再生されるときの構成は一度も比較されていなかった**。基準 CSV も `--playback` で作ること。
+//   ★テレポート再整合 (TeleportResetThreshold) はここでは比較できない。C# に対応物が無く、
+//     UE 側が意図的に足した差分だから (docs/porting_notes.md の「意図的に C# と変えた所」を参照)。
 
 #include "Misc/AutomationTest.h"
 #include "Misc/FileHelper.h"
@@ -117,6 +124,27 @@ namespace
 		}
 		if (OutByFrame.Num() == 0) { OutError = TEXT("データ行が無い"); return false; }
 		return true;
+	}
+
+	// -----------------------------------------------------------------------
+	// 再生時のソルバ設定 (MMD_PARITY_PLAYBACK=1)
+	//
+	// ★コア既定と再生時の設定は大きく違う。パリティはこれまでコア既定でしか比べておらず、
+	//   **実際に再生されるときの構成は一度も比較されていなかった**。
+	//   値は FAnimNode_MmdPhysics の既定 (= 再生時に使われる値) に合わせてある。
+	//   ノード側の既定を変えたらここも直すこと。
+	//
+	// ★Tools/CsReference の ApplyPlaybackSettings と**同じ値にすること**。
+	// -----------------------------------------------------------------------
+	void ApplyPlaybackSettings(PhysicsWorld& W)
+	{
+		W.SolverIterations = 10;
+		W.JointVelocityIterations = 40;
+		W.JointMaxCorrectionVel = 30.0f;
+		W.SubSteps = 2;
+		W.FixedTimeStep = 1.0f / 60.0f;
+		W.UseSplitImpulse = true;
+		W.UseJointSplitImpulse = true;
 	}
 
 	// -----------------------------------------------------------------------
@@ -230,6 +258,8 @@ bool FMmdPhysicsGlbParityTest::RunTest(const FString& Parameters)
 	const float Tol = TolEnv.IsEmpty() ? 0.0f : FCString::Atof(*TolEnv);
 	// 駆動あり。基準 CSV も --drive で作ったものを渡すこと (食い違うと当然落ちる)。
 	const bool bDrive = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_PARITY_DRIVE")) == TEXT("1");
+	// 再生時のソルバ設定。基準 CSV も --playback で作ったものを渡すこと。
+	const bool bPlayback = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_PARITY_PLAYBACK")) == TEXT("1");
 
 	// --- 基準 CSV ---
 	FString CsvText;
@@ -276,6 +306,12 @@ bool FMmdPhysicsGlbParityTest::RunTest(const FString& Parameters)
 	TSharedPtr<PmxPhysicsBuilder> B = PmxPhysicsBuilder::Build(Model);
 	AddInfo(FString::Printf(TEXT("built bodies=%d joints=%d pairs=%d"),
 		B->Bodies.Num(), B->World.Joints.Num(), B->World.DebugCollisionPairCount()));
+
+	if (bPlayback)
+	{
+		ApplyPlaybackSettings(B->World);
+		AddInfo(TEXT("再生時のソルバ設定で回す (iter=10 jointiter=40 maxcorr=30 sub=2 fixed=1/60 split=1 jointsplit=1)。"));
+	}
 
 	if (!TestEqual(TEXT("剛体数が基準と一致する"), B->Bodies.Num(), Golden.Num()))
 	{
