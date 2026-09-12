@@ -9,6 +9,7 @@
 #include "Animation/AnimBlueprint.h"
 #include "Animation/AnimInstance.h"
 #include "Animation/Skeleton.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
 #include "Engine/SkeletalMesh.h"
 #include "Factories/AnimBlueprintFactory.h"
@@ -17,6 +18,9 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "MmdGlbPhysicsReader.h"
 #include "MmdPhysicsCoreLog.h"
+#include "MmdPhysicsDataAsset.h"
+#include "Misc/FileHelper.h"
+#include "UObject/Package.h"
 #include "UObject/SavePackage.h"
 
 #define LOCTEXT_NAMESPACE "MmdPhysicsWiring"
@@ -93,6 +97,81 @@ namespace
 		Node->NodePosY = PosY;
 		Graph->AddNode(Node, /*bFromUI=*/false, /*bSelectNewNode=*/false);
 		return Node;
+	}
+
+	/**
+	 * .glb から JSON チャンクだけを取り出して UMmdPhysicsData アセットへ格納する。
+	 * 既にあれば中身を作り直す (名前を変えて増やさない)。失敗したら nullptr と理由を返す。
+	 */
+	UMmdPhysicsData* CreateOrUpdatePhysicsData(USkeletalMesh* Mesh, const FString& GlbPath,
+		float UnitScale, FString& OutMessage)
+	{
+		TArray<uint8> Bytes;
+		if (!FFileHelper::LoadFileToArray(Bytes, *GlbPath))
+		{
+			OutMessage = FString::Printf(TEXT(".glb を読めません: %s"), *GlbPath);
+			return nullptr;
+		}
+
+		TArray<uint8> Minimal;
+		TArray<FString> Warnings;
+		if (!MmdPhysics::GlbPhysicsReader::ExtractJsonChunkGlb(Bytes, Minimal, Warnings))
+		{
+			OutMessage = FString::Printf(TEXT("物理データを取り出せません: %s"),
+				Warnings.Num() > 0 ? *Warnings[0] : TEXT("原因不明"));
+			return nullptr;
+		}
+
+		// ★取り出した最小 GLB が本当に読めるか、ここで検証してから保存する。
+		//   壊れたものを保存すると、失敗が実行時まで遅れてビルドでしか気付けなくなる。
+		float CheckScale = 0.0f;
+		TArray<FString> CheckWarnings;
+		TSharedPtr<MmdPhysics::PmxPhysicsModel> Check =
+			MmdPhysics::GlbPhysicsReader::LoadBytes(Minimal, CheckScale, CheckWarnings);
+		if (!Check.IsValid())
+		{
+			OutMessage = TEXT("取り出した物理データを読み直せませんでした (GLB の構造が想定と違う可能性)。");
+			return nullptr;
+		}
+
+		const FString PackagePath = FPackageName::GetLongPackagePath(Mesh->GetOutermost()->GetName());
+		const FString AssetName = FString::Printf(TEXT("%s_Physics"), *Mesh->GetName());
+		const FString FullPath = PackagePath / AssetName + TEXT(".") + AssetName;
+
+		UMmdPhysicsData* Data = LoadObject<UMmdPhysicsData>(nullptr, *FullPath, nullptr, LOAD_NoWarn | LOAD_Quiet);
+		if (Data == nullptr)
+		{
+			UPackage* Package = CreatePackage(*(PackagePath / AssetName));
+			if (Package == nullptr)
+			{
+				OutMessage = FString::Printf(TEXT("パッケージを作れません: %s"), *FullPath);
+				return nullptr;
+			}
+			Package->FullyLoad();
+			Data = NewObject<UMmdPhysicsData>(Package, *AssetName, RF_Public | RF_Standalone);
+			if (Data == nullptr)
+			{
+				OutMessage = FString::Printf(TEXT("物理データアセットを作れません: %s"), *FullPath);
+				return nullptr;
+			}
+			FAssetRegistryModule::AssetCreated(Data);
+		}
+
+		Data->Modify();
+		Data->Glb = MoveTemp(Minimal);
+		Data->SourceGlbName = FPaths::GetCleanFilename(GlbPath);
+		Data->UnitScale = CheckScale > 0.0f ? CheckScale : UnitScale;
+		Data->NumRigidBodies = Check->RigidBodies.Num();
+		Data->NumJoints = Check->Joints.Num();
+		Data->MarkPackageDirty();
+
+		UE_LOG(LogMmdPhysics, Log,
+			TEXT("[MmdPhysics] 物理データを保存: %s (%d バイト / 元 .glb の %.1f%%、剛体%d ジョイント%d)"),
+			*FullPath, Data->Glb.Num(),
+			Bytes.Num() > 0 ? 100.0 * Data->Glb.Num() / Bytes.Num() : 0.0,
+			Data->NumRigidBodies, Data->NumJoints);
+
+		return Data;
 	}
 }
 
@@ -221,8 +300,21 @@ FMmdWireResult FMmdPhysicsWiring::WirePhysics(USkeletalMesh* Mesh, const FString
 		}
 	}
 
+	// --- 物理データをアセット化する ---
+	// ★.glb は UAsset ではないのでクックされず、GlbPath の絶対パスは配布先に存在しない。
+	//   アセットにしておけば Anim Blueprint から参照されてビルドへ同梱される。
+	//   これを怠ると「エディタでは動くのにパッケージしたビルドでは無言で物理が効かない」
+	//   という壊れ方をする (移植元の Unity 版が APK で踏んだ。詳細は MmdPhysicsDataAsset.h)。
+	UMmdPhysicsData* DataAsset = CreateOrUpdatePhysicsData(Mesh, GlbPath, UnitScale, Result.Message);
+	if (DataAsset == nullptr)
+	{
+		// Message には理由が入っている。配線そのものは続けず、原因を返す。
+		return Result;
+	}
+
 	// --- 設定を書き込む ---
-	PhysNode->Node.GlbPath = GlbPath;
+	PhysNode->Node.PhysicsData = DataAsset;
+	PhysNode->Node.GlbPath = GlbPath;   // エディタでの確認用に残す (ビルドでは使えない)
 	PhysNode->Node.UnitScale = UnitScale;
 	PhysNode->Modify();
 
@@ -245,6 +337,9 @@ FMmdWireResult FMmdPhysicsWiring::WirePhysics(USkeletalMesh* Mesh, const FString
 	//   ここで保存しないとエディタを閉じた時点で消え、スケルタルメッシュ側の参照だけが残る。
 	//   FEditorFileUtils::PromptForCheckoutAndSave は unattended 実行では何も保存しないため、
 	//   パッケージを直接書き出す。
+	//   ★物理データアセットも必ず保存すること。保存し忘れると、Anim Blueprint だけが
+	//     ディスクに残って参照先が消え、次にプロジェクトを開いたとき物理が無効になる。
+	SavePackageOf(DataAsset);
 	SavePackageOf(AnimBP);
 	SavePackageOf(Mesh);
 

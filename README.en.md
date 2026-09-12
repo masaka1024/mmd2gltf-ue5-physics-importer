@@ -104,7 +104,31 @@ See [INSTALL.md](INSTALL.md).
 6. Drop the resulting `BP_<MeshName>` into the level and play
 
 Step 1 creates and assigns a Post-Process Anim Blueprint named `ABP_<MeshName>_MmdPhysics`
-next to the skeletal mesh.
+and a physics data asset named `<MeshName>_Physics` next to the skeletal mesh.
+
+### Making physics work in a packaged build
+
+**Re-run step 1 (wire physics).** When you package the game, the `.glb` is not a UAsset, so it is
+**not cooked**, and the `C:\...` absolute path the wiring used to hold does not exist on the target
+machine. Without this the runtime cannot read the physics data and **the cloth simply does not move,
+with no error** — and you will not notice in the editor, where the path happens to resolve.
+
+So step 1 now extracts just the part of the `.glb` that physics needs into a `<MeshName>_Physics`
+asset and points the Anim Blueprint at it. Because the Anim Blueprint references that asset, it is
+packaged with the build and can be read anywhere.
+
+- Only the glTF **JSON chunk** is extracted. Rigid bodies, joints and the bone hierarchy all live
+  there; meshes and textures (the BIN chunk) are never used by physics. Measured at about **1%** of
+  the original `.glb` (41.6 MB → 453 KB).
+- The bytes are copied verbatim from the original `.glb`, so behaviour is identical to reading the
+  `.glb` directly.
+
+> **⚠️ Models wired before 2026-09-12 have this asset empty.**
+> Re-run step 1 for each model before packaging. If you package with it empty, the runtime logs the
+> cause and the fix as a `LogMmdPhysics` error.
+
+The `.glb` path is still kept in the settings, but it is **for checking in the editor only**. It does
+not work in a packaged build.
 
 Step 3 creates a Blueprint actor named `BP_<MeshName>`. Just placing it in the level gets you
 physics, materials, outlines, the hair's second pass and the motion all working. **Run it after

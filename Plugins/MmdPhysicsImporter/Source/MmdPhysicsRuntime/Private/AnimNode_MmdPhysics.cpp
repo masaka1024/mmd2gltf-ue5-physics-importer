@@ -3,6 +3,7 @@
 #include "AnimNode_MmdPhysics.h"
 #include "MmdUeSpace.h"
 #include "MmdGlbPhysicsReader.h"
+#include "MmdPhysicsDataAsset.h"
 #include "MmdPhysicsCoreLog.h"
 #include "Animation/AnimInstanceProxy.h"
 
@@ -67,24 +68,52 @@ void FAnimNode_MmdPhysics::EnsureLoaded()
 	if (bLoadAttempted) return;
 	bLoadAttempted = true;
 
-	if (GlbPath.IsEmpty())
+	// ★データ源は 2 つある。PhysicsData を優先すること。
+	//   GlbPath はエディタでの確認用のフォールバックで、パッケージしたビルドでは必ず失敗する
+	//   (.glb はクックされず、絶対パスも配布先には存在しない)。移植元の Unity 版が APK で
+	//   同じ壊れ方をしていた (74fcc16)。詳しくは MmdPhysicsDataAsset.h を参照。
+	const bool bHasAsset = (PhysicsData != nullptr && PhysicsData->HasData());
+	if (!bHasAsset && GlbPath.IsEmpty())
 	{
-		UE_LOG(LogMmdPhysics, Warning, TEXT("[MmdPhysics] GlbPath が空です。物理は無効のままになります。"));
+		UE_LOG(LogMmdPhysics, Warning,
+			TEXT("[MmdPhysics] 物理データがありません (PhysicsData も GlbPath も空)。物理は無効のままになります。"));
 		return;
 	}
 
 	float LoadedUnitScale = 0.0f;
 	TArray<FString> Warnings;
-	Model = GlbPhysicsReader::LoadFile(GlbPath, LoadedUnitScale, Warnings);
+	FString SourceLabel;
+	if (bHasAsset)
+	{
+		SourceLabel = FString::Printf(TEXT("PhysicsData '%s'"), *PhysicsData->GetName());
+		Model = GlbPhysicsReader::LoadBytes(PhysicsData->Glb, LoadedUnitScale, Warnings);
+	}
+	else
+	{
+		SourceLabel = GlbPath;
+		Model = GlbPhysicsReader::LoadFile(GlbPath, LoadedUnitScale, Warnings);
+	}
 	for (const FString& W : Warnings)
 	{
 		UE_LOG(LogMmdPhysics, Warning, TEXT("[MmdPhysics] %s"), *W);
 	}
 	if (!Model.IsValid())
 	{
-		UE_LOG(LogMmdPhysics, Error, TEXT("[MmdPhysics] GLB を読めませんでした: %s"), *GlbPath);
+		UE_LOG(LogMmdPhysics, Error, TEXT("[MmdPhysics] 物理データを読めませんでした: %s"), *SourceLabel);
 		return;
 	}
+
+	// ★パッケージしたビルドで GlbPath 経由に落ちたら、原因と手順をログに残す。
+	//   ここを黙って通すと「エディタでは動くのにビルドでは動かない」を追えなくなる。
+#if !WITH_EDITOR
+	if (!bHasAsset)
+	{
+		UE_LOG(LogMmdPhysics, Error,
+			TEXT("[MmdPhysics] PhysicsData が未設定のため .glb の絶対パスから読み込みました。")
+			TEXT("パッケージしたビルドでは通常この経路は失敗します。")
+			TEXT("エディタで対象モデルの「物理を配線 / 再配線」を実行し直してください。"));
+	}
+#endif
 
 	// extras.mmd の unitScale とノード設定が食い違うと、剛体だけ別スケールで配置される。
 	if (!FMath::IsNearlyEqual(LoadedUnitScale, UnitScale, 1e-6f))
@@ -100,7 +129,7 @@ void FAnimNode_MmdPhysics::EnsureLoaded()
 
 	UE_LOG(LogMmdPhysics, Log,
 		TEXT("[MmdPhysics] 読み込み完了: ボーン%d 剛体%d ジョイント%d (unitScale=%g) %s"),
-		Model->BoneNames.Num(), Builder->Bodies.Num(), Builder->World.Joints.Num(), UnitScale, *GlbPath);
+		Model->BoneNames.Num(), Builder->Bodies.Num(), Builder->World.Joints.Num(), UnitScale, *SourceLabel);
 }
 
 void FAnimNode_MmdPhysics::ApplySolverSettings()
