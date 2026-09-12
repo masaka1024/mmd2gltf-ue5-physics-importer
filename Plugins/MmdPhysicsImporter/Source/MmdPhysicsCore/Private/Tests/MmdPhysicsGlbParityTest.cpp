@@ -8,10 +8,21 @@
 //   MMD_PARITY_GLB     … mmd2gltf-gui が出力した .glb
 //   MMD_PARITY_CSV     … Tools/CsReference が出力した基準 CSV
 //   MMD_PARITY_FRAMES  … ステップ数 (既定 60。CSV を作ったときと同じ値にすること)
-//   MMD_PARITY_TOL     … 位置の許容差 (PMX 単位。既定 1e-3 = 0.08mm 相当)
+//   MMD_PARITY_TOL     … 位置の許容差 (PMX 単位。★既定 0 = ビット一致を要求する)
+//
+// ★許容差の既定は 0 である。このテストの目的は「C++ が C# とビット一致するか」であって
+//   「近いか」ではない。1〜2 ULP の混入 (FMA 収縮・float 版の数学関数・列挙順序) は
+//   接触が続く系で指数的に増幅し、60 フレームで 5.4e-01 まで開いた実測がある
+//   (MmdPhysicsCore.Build.cs の FPSemantics の注記を参照)。ゆるい許容差はそれを見逃す。
+//   環境差の調査などで一時的にゆるめたいときだけ MMD_PARITY_TOL を指定すること。
 //
 // 基準 CSV の作り方:
 //   dotnet run --project Tools/CsReference -c Release -- <glb> 60 out/ia_60_cs.csv
+//
+// ★毎フレーム比較 (どのフレームで壊れたかを出す):
+//   dotnet run --project Tools/CsReference -c Release -- <glb> 60 out/ia_60_cs_pf.csv --per-frame
+//   で 1 行目が "frame," で始まる CSV を作ると、このテストは毎フレーム突き合わせて
+//   **最初にずれたフレーム**を報告する。取り込みで壊れたときの切り分けが速くなる。
 //
 // ★駆動は行わない。アニメーションを与えると取り込み経路の差まで混ざり、
 //   物理エンジンの移植が正しいかを切り分けられなくなる。両側とも
@@ -37,30 +48,56 @@ namespace
 		Quat Rot;
 	};
 
-	bool ParseGolden(const FString& CsvText, TArray<FGoldenRow>& OutRows, FString& OutError)
+	/**
+	 * 基準 CSV を読む。2 つの形式を自動判別する。
+	 *   最終フレームのみ : index,name,px,py,pz,qx,qy,qz,qw
+	 *   毎フレーム       : frame,index,name,px,py,pz,qx,qy,qz,qw  (1 行目が "frame," で始まる)
+	 * 毎フレーム形式なら OutByFrame[f] に f+1 ステップ目の全剛体が入る。
+	 */
+	bool ParseGolden(const FString& CsvText, TArray<TArray<FGoldenRow>>& OutByFrame,
+		bool& bOutPerFrame, FString& OutError)
 	{
 		TArray<FString> Lines;
 		CsvText.ParseIntoArrayLines(Lines);
 		if (Lines.Num() < 2) { OutError = TEXT("CSV の行が足りない"); return false; }
-		// 1 行目はヘッダ。
+
+		bOutPerFrame = Lines[0].StartsWith(TEXT("frame,"));
+		// 毎フレーム形式は先頭に frame 列が入るぶん、各列が 1 つ後ろへずれる。
+		const int32 Base = bOutPerFrame ? 1 : 0;
+		const int32 MinCols = 9 + Base;
+
+		OutByFrame.Reset();
+		int32 CurFrame = -1;
 		for (int32 L = 1; L < Lines.Num(); L++)
 		{
 			const FString& Line = Lines[L];
 			if (Line.IsEmpty()) continue;
 			TArray<FString> Cols;
 			Line.ParseIntoArray(Cols, TEXT(","), false);
-			if (Cols.Num() < 9)
+			if (Cols.Num() < MinCols)
 			{
 				OutError = FString::Printf(TEXT("%d 行目の列数が足りない (%d)"), L + 1, Cols.Num());
 				return false;
 			}
+			if (bOutPerFrame)
+			{
+				const int32 Frame = FCString::Atoi(*Cols[0]);
+				if (Frame != CurFrame) { OutByFrame.AddDefaulted(); CurFrame = Frame; }
+			}
+			else if (OutByFrame.Num() == 0)
+			{
+				OutByFrame.AddDefaulted();
+			}
+
 			FGoldenRow Row;
-			Row.Name = Cols[1];
-			Row.Pos = Vec3(FCString::Atof(*Cols[2]), FCString::Atof(*Cols[3]), FCString::Atof(*Cols[4]));
-			Row.Rot = Quat(FCString::Atof(*Cols[5]), FCString::Atof(*Cols[6]),
-				FCString::Atof(*Cols[7]), FCString::Atof(*Cols[8]));
-			OutRows.Add(Row);
+			Row.Name = Cols[Base + 1];
+			Row.Pos = Vec3(FCString::Atof(*Cols[Base + 2]), FCString::Atof(*Cols[Base + 3]),
+				FCString::Atof(*Cols[Base + 4]));
+			Row.Rot = Quat(FCString::Atof(*Cols[Base + 5]), FCString::Atof(*Cols[Base + 6]),
+				FCString::Atof(*Cols[Base + 7]), FCString::Atof(*Cols[Base + 8]));
+			OutByFrame.Last().Add(Row);
 		}
+		if (OutByFrame.Num() == 0) { OutError = TEXT("データ行が無い"); return false; }
 		return true;
 	}
 
@@ -90,7 +127,8 @@ bool FMmdPhysicsGlbParityTest::RunTest(const FString& Parameters)
 	const FString FramesEnv = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_PARITY_FRAMES"));
 	const int32 Frames = FramesEnv.IsEmpty() ? 60 : FCString::Atoi(*FramesEnv);
 	const FString TolEnv = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_PARITY_TOL"));
-	const float Tol = TolEnv.IsEmpty() ? 1e-3f : FCString::Atof(*TolEnv);
+	// ★既定は 0 (ビット一致を要求)。ヘッダの注記を参照。
+	const float Tol = TolEnv.IsEmpty() ? 0.0f : FCString::Atof(*TolEnv);
 
 	// --- 基準 CSV ---
 	FString CsvText;
@@ -99,12 +137,26 @@ bool FMmdPhysicsGlbParityTest::RunTest(const FString& Parameters)
 		AddError(FString::Printf(TEXT("基準 CSV を読めない: %s"), *CsvPath));
 		return false;
 	}
-	TArray<FGoldenRow> Golden;
+	TArray<TArray<FGoldenRow>> GoldenByFrame;
+	bool bPerFrame = false;
 	FString ParseError;
-	if (!ParseGolden(CsvText, Golden, ParseError))
+	if (!ParseGolden(CsvText, GoldenByFrame, bPerFrame, ParseError))
 	{
 		AddError(FString::Printf(TEXT("基準 CSV の解析に失敗: %s"), *ParseError));
 		return false;
+	}
+	// 最終フレームの基準。以降の突き合わせはこれを使う (従来と同じ)。
+	const TArray<FGoldenRow>& Golden = GoldenByFrame.Last();
+	if (bPerFrame)
+	{
+		AddInfo(FString::Printf(TEXT("毎フレーム形式の基準 CSV (%d フレーム分)。最初にずれたフレームを報告する。"),
+			GoldenByFrame.Num()));
+		if (GoldenByFrame.Num() != Frames)
+		{
+			AddWarning(FString::Printf(
+				TEXT("基準 CSV は %d フレーム分だが MMD_PARITY_FRAMES=%d。重なる範囲だけ比較する。"),
+				GoldenByFrame.Num(), Frames));
+		}
 	}
 
 	// --- UE 側で同じことをする ---
@@ -129,9 +181,52 @@ bool FMmdPhysicsGlbParityTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
+	// ★毎フレーム形式なら 1 ステップごとに突き合わせ、最初にずれたフレームを覚える。
+	//   最終フレームだけ見ていると「いつ壊れたか」が落ちてしまい、取り込みで壊れたときの
+	//   切り分けに使えない。ずれを見つけても最後まで回す (最終差も併せて報告するため)。
+	int32 FirstBadFrame = -1;
+	int32 FirstBadBody = -1;
+	float FirstBadPos = 0.0f, FirstBadRot = 0.0f;
+
 	for (int32 f = 0; f < Frames; f++)
 	{
 		B->World.StepSimulation(1.0f / 30.0f);
+
+		if (!bPerFrame || FirstBadFrame >= 0 || !GoldenByFrame.IsValidIndex(f)) continue;
+
+		const TArray<FGoldenRow>& G = GoldenByFrame[f];
+		if (G.Num() != B->Bodies.Num()) continue;   // 行数が合わない分は最終判定に任せる
+		for (int32 i = 0; i < B->Bodies.Num(); i++)
+		{
+			const RigidTransform& T = B->Bodies[i]->WorldTransform;
+			const float P = (T.Origin - G[i].Pos).Length();
+			const float R = QuatDelta(T.Rotation, G[i].Rot);
+			if (P > Tol || R > Tol)
+			{
+				FirstBadFrame = f + 1;   // 1 始まり (CSV の frame 列と揃える)
+				FirstBadBody = i;
+				FirstBadPos = P;
+				FirstBadRot = R;
+				break;
+			}
+		}
+	}
+
+	if (bPerFrame)
+	{
+		if (FirstBadFrame < 0)
+		{
+			AddInfo(FString::Printf(TEXT("全 %d フレームで基準と一致 (許容差 %.6g)。"),
+				FMath::Min(Frames, GoldenByFrame.Num()), Tol));
+		}
+		else
+		{
+			AddError(FString::Printf(
+				TEXT("★最初にずれたフレーム: %d (剛体#%d %s / 位置差 %.6g / 回転差 %.6g、許容差 %.6g)"),
+				FirstBadFrame, FirstBadBody,
+				B->Bodies.IsValidIndex(FirstBadBody) ? *B->Bodies[FirstBadBody]->Name : TEXT("-"),
+				FirstBadPos, FirstBadRot, Tol));
+		}
 	}
 
 	// --- 突き合わせ ---
