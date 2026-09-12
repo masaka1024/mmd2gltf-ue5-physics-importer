@@ -4,14 +4,18 @@
 // 全剛体のワールド姿勢を CSV へ落とす。UE 側の MmdPhysics.Core.GlbParity が
 // 同じ入力・同じ手順で回した結果とこれを突き合わせる。
 //
-// ★外部からの駆動は一切行わない。
-//   ボーンアニメーションを与えると「アニメの取り込み経路」の差まで混ざり、
+// ★ボーンアニメーションによる駆動は一切行わない。
+//   アニメを与えると「アニメの取り込み経路」の差まで混ざり、
 //   物理エンジンの移植が正しいかどうかを切り分けられなくなる。
 //   PhysicsWorld.AddBody が kinematic 剛体の KinematicTarget をバインド姿勢で
 //   初期化するので、駆動なしでも「体は静止・揺れ物は重力で落ちる」状態を再現できる。
 //
+// ★ただし駆動なしだけでは「毎フレーム kinematic ターゲットが更新される経路」を
+//   一度も比較できない。そこで --drive を足した。アニメではなく**式で決まる合成モーション**
+//   なので、取り込み経路は混ざらないまま駆動経路だけを比較できる (ApplyDrive を参照)。
+//
 // 使い方:
-//   dotnet run --project Tools/CsReference -- <glb> <frames> <out.csv> [--per-frame]
+//   dotnet run --project Tools/CsReference -- <glb> <frames> <out.csv> [--per-frame] [--drive]
 //
 // --per-frame を付けると、最終フレームだけでなく **毎フレーム** の全剛体姿勢を出す
 // (ヘッダが "frame," で始まる)。UE 側の GlbParity はこの形式を自動判別して毎フレーム
@@ -41,6 +45,7 @@ internal static class Program
         int frames = int.Parse(args[1], CultureInfo.InvariantCulture);
         string outPath = args[2];
         bool perFrame = Array.IndexOf(args, "--per-frame") >= 0;
+        bool drive = Array.IndexOf(args, "--drive") >= 0;
 
         var model = GlbPhysicsReader.LoadFile(glbPath, out float unitScale, out List<string> warnings);
         foreach (var w in warnings) Console.Error.WriteLine("[warn] " + w);
@@ -70,6 +75,7 @@ internal static class Program
 
         for (int f = 0; f < frames; f++)
         {
+            if (drive) ApplyDrive(builder, model, f + 1);
             builder.World.StepSimulation(1f / 30f);
             // frame 列は 1 始まり (「何ステップ回した後か」と一致させる)。
             if (perFrame)
@@ -85,6 +91,39 @@ internal static class Program
             ? $"wrote {builder.Bodies.Count} bodies x {frames} frames -> {outPath}"
             : $"wrote {builder.Bodies.Count} rows -> {outPath}");
         return 0;
+    }
+
+    // -----------------------------------------------------------------------
+    // 駆動 (--drive)
+    //
+    // ★アニメーションは使わない。ファイルの冒頭に書いたとおり、アニメを与えると
+    //   「取り込み経路の差」まで混ざって物理の移植を切り分けられなくなる。
+    //   そこで**式で決まる合成モーション**で駆動剛体を動かす。両側が同じ式・同じ定数・
+    //   同じ数学関数 ((float)Math.Sin = UE 側の MSin) で計算するので、入力はビット単位で一致する。
+    //
+    // 中身: 駆動ボーンをバインド位置から X 方向へ揺らし、姿勢に Y 軸回転を与える。
+    //   これで「毎フレーム更新される kinematic ターゲット」「駆動剛体が動いて鎖へ外力が入る」
+    //   「駆動剛体が揺れ物へ当たる」という、従来の駆動なしパリティが一度も通らなかった経路を通す。
+    //   物理的な自然さは狙っていない (パリティの目的は挙動の一致であって見た目ではない)。
+    // -----------------------------------------------------------------------
+    private const float DriveSwayAmp = 1.0f;    // PMX 単位 (= 8cm)
+    private const float DriveRotAmp = 0.2f;     // ラジアン (約 11 度)
+    private const float DriveTwoPi = 6.2831853f;
+
+    private static void ApplyDrive(PmxPhysicsBuilder builder, PmxPhysicsModel model, int frame)
+    {
+        float t = frame / 30f;
+        float sway = DriveSwayAmp * (float)Math.Sin(DriveTwoPi * 0.7f * t);
+        float ang = DriveRotAmp * (float)Math.Sin(DriveTwoPi * 0.5f * t);
+        float half = ang * 0.5f;
+        var q = new Quat(0f, (float)Math.Sin(half), 0f, (float)Math.Cos(half));
+
+        builder.ApplyKinematicTargets(i =>
+        {
+            if (i < 0 || i >= model.BonePositions.Count) return null;
+            var p = model.BonePositions[i];
+            return new RigidTransform(q, new Vec3(p.x + sway, p.y, p.z));
+        });
     }
 
     // "R" は float の往復可能な最短表現。UE 側は %.9g で出すので、比較は数値で行う。

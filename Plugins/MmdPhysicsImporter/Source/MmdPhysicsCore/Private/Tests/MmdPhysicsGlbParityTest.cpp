@@ -24,9 +24,17 @@
 //   で 1 行目が "frame," で始まる CSV を作ると、このテストは毎フレーム突き合わせて
 //   **最初にずれたフレーム**を報告する。取り込みで壊れたときの切り分けが速くなる。
 //
-// ★駆動は行わない。アニメーションを与えると取り込み経路の差まで混ざり、
-//   物理エンジンの移植が正しいかを切り分けられなくなる。両側とも
+// ★アニメーションによる駆動は行わない。アニメを与えると取り込み経路の差まで混ざり、
+//   物理エンジンの移植が正しいかを切り分けられなくなる。既定では両側とも
 //   「AddBody がバインド姿勢で初期化した KinematicTarget のまま StepSimulation を回す」。
+//
+// ★駆動ありのパリティ (MMD_PARITY_DRIVE=1):
+//   既定 (駆動なし) だけでは「毎フレーム kinematic ターゲットが更新される経路」を
+//   一度も比較できない。駆動剛体が動いて鎖へ外力が入る経路・駆動剛体が揺れ物へ当たる経路も
+//   同様に未比較のまま残る。そこで**式で決まる合成モーション**で駆動する (ApplyDrive)。
+//   アニメではないので取り込み経路は混ざらず、駆動経路だけを比較できる。
+//   基準 CSV も `--drive` を付けて作ること:
+//     dotnet run --project Tools/CsReference -c Release -- <glb> 60 out/ia_60_drive_pf.csv --per-frame --drive
 
 #include "Misc/AutomationTest.h"
 #include "Misc/FileHelper.h"
@@ -101,6 +109,37 @@ namespace
 		return true;
 	}
 
+	// -----------------------------------------------------------------------
+	// 駆動 (MMD_PARITY_DRIVE=1)
+	//
+	// ★アニメーションは使わない。アニメを与えると「取り込み経路の差」まで混ざり、
+	//   物理エンジンの移植が正しいかを切り分けられなくなる (ヘッダの注記を参照)。
+	//   そこで**式で決まる合成モーション**で駆動剛体を動かす。両側が同じ式・同じ定数・
+	//   同じ数学関数 (MSin = C# の (float)Math.Sin) で計算するので、入力はビット単位で一致する。
+	//
+	// ★Tools/CsReference の ApplyDrive と**同じ式にすること**。片方だけ変えると
+	//   パリティが落ちるが、原因が移植漏れなのか式の食い違いなのか分からなくなる。
+	// -----------------------------------------------------------------------
+	constexpr float KDriveSwayAmp = 1.0f;    // PMX 単位 (= 8cm)
+	constexpr float KDriveRotAmp = 0.2f;     // ラジアン (約 11 度)
+	constexpr float KDriveTwoPi = 6.2831853f;
+
+	void ApplyDrive(PmxPhysicsBuilder& B, const PmxPhysicsModel& Model, int32 Frame)
+	{
+		const float t = Frame / 30.0f;
+		const float Sway = KDriveSwayAmp * MSin(KDriveTwoPi * 0.7f * t);
+		const float Ang = KDriveRotAmp * MSin(KDriveTwoPi * 0.5f * t);
+		const float Half = Ang * 0.5f;
+		const Quat Q(0.0f, MSin(Half), 0.0f, MCos(Half));
+
+		B.ApplyKinematicTargets([&Model, &Q, Sway](int32 i) -> TOptional<RigidTransform>
+		{
+			if (i < 0 || i >= Model.BonePositions.Num()) return TOptional<RigidTransform>();
+			const Vec3& P = Model.BonePositions[i];
+			return TOptional<RigidTransform>(RigidTransform(Q, Vec3(P.x + Sway, P.y, P.z)));
+		});
+	}
+
 	/** クォータニオンは q と -q が同一回転なので、符号を揃えてから比較する。 */
 	float QuatDelta(const Quat& A, const Quat& B)
 	{
@@ -129,6 +168,8 @@ bool FMmdPhysicsGlbParityTest::RunTest(const FString& Parameters)
 	const FString TolEnv = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_PARITY_TOL"));
 	// ★既定は 0 (ビット一致を要求)。ヘッダの注記を参照。
 	const float Tol = TolEnv.IsEmpty() ? 0.0f : FCString::Atof(*TolEnv);
+	// 駆動あり。基準 CSV も --drive で作ったものを渡すこと (食い違うと当然落ちる)。
+	const bool bDrive = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_PARITY_DRIVE")) == TEXT("1");
 
 	// --- 基準 CSV ---
 	FString CsvText;
@@ -190,6 +231,7 @@ bool FMmdPhysicsGlbParityTest::RunTest(const FString& Parameters)
 
 	for (int32 f = 0; f < Frames; f++)
 	{
+		if (bDrive) ApplyDrive(*B, *Model, f + 1);
 		B->World.StepSimulation(1.0f / 30.0f);
 
 		if (!bPerFrame || FirstBadFrame >= 0 || !GoldenByFrame.IsValidIndex(f)) continue;
