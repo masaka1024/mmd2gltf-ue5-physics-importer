@@ -288,8 +288,10 @@ bool FMmdMaterialConversionTest::RunTest(const FString& Parameters)
 		FMmdUvAlphaStats UvStats;
 		if (Set.HasTexture(Info->OrigTexture))
 		{
+			// ★GlbPath を渡すこと。抽出テクスチャはモデルごとのサブフォルダに入るので、
+			//   渡さないと見つからず UV 測定が飛んで方針が食い違う。
 			UTexture2D* OrigTex2D = FMmdMaterialConversion::FindImportedTextureByImageName(
-				Set.TextureImageNames[Info->OrigTexture], PackagePath);
+				Set.TextureImageNames[Info->OrigTexture], PackagePath, GlbPath);
 			if (OrigTex2D != nullptr)
 			{
 				FMmdMaterialConversion::MeasureUvAlpha(Mesh, i, OrigTex2D, UvStats);

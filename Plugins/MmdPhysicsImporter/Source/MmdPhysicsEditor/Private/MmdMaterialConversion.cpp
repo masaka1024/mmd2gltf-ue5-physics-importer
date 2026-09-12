@@ -179,7 +179,26 @@ namespace
 		return ObjectTools::SanitizeObjectName(ImageName.Replace(TEXT("."), TEXT("_")));
 	}
 
-	UTexture2D* FindImportedTexture(const FString& ImageName, const FString& PackagePath)
+	/**
+	 * 抽出テクスチャをモデルごとに分けるためのフォルダ名を .glb から作る。
+	 *
+	 * ★同じ Content フォルダへ 2 体取り込むと、抽出名が衝突して**別モデルのテクスチャで
+	 *   上書きされる**。MMD は「顔.png」「体.png」のような汎用名が多く、`Image.Name` が
+	 *   空なら `tex_0` で確実にぶつかる。移植元の Unity 版が同じ壊れ方をして直した
+	 *   (d581142)。あちらと同じく .glb 名でサブフォルダを切る。
+	 */
+	FString ExtractedSubFolderFor(const FString& GlbPath)
+	{
+		const FString Base = FPaths::GetBaseFilename(GlbPath);
+		if (Base.IsEmpty()) return FString();
+		return ObjectTools::SanitizeObjectName(Base);
+	}
+
+	/**
+	 * @param ExtractedSubFolder  モデルごとの抽出先 (空なら旧来の平置きだけを見る)。
+	 */
+	UTexture2D* FindImportedTexture(const FString& ImageName, const FString& PackagePath,
+		const FString& ExtractedSubFolder = FString())
 	{
 		if (ImageName.IsEmpty()) return nullptr;
 
@@ -191,7 +210,16 @@ namespace
 
 		// 1) まず同じフォルダ (モデルと一緒に取り込まれたテクスチャ)、
 		//    次に GLB から取り出した置き場 (前回の変換で作ったもの)。
-		const FString SearchPaths[] = { PackagePath, PackagePath / KExtractedFolderName };
+		//    ★平置き (サブフォルダ無し) は**この変更より前に抽出したもの**が残っている経路。
+		//      消さずに最後に見るので、再変換しなくても従来のアセットを拾い直せる。
+		TArray<FString> SearchPaths;
+		SearchPaths.Add(PackagePath);
+		if (!ExtractedSubFolder.IsEmpty())
+		{
+			SearchPaths.Add(PackagePath / KExtractedFolderName / ExtractedSubFolder);
+		}
+		SearchPaths.Add(PackagePath / KExtractedFolderName);
+
 		for (const FString& Dir : SearchPaths)
 		{
 			for (const FString& Name : Candidates)
@@ -239,7 +267,8 @@ namespace
 			UTexture2D* Tex = nullptr;
 			if (Set.HasTexture(TextureIndex))
 			{
-				Tex = FindImportedTexture(Set.TextureImageNames[TextureIndex], PackagePath);
+				Tex = FindImportedTexture(Set.TextureImageNames[TextureIndex], PackagePath,
+					ExtractedSubFolderFor(GlbPath));
 			}
 			if (Tex == nullptr)
 			{
@@ -326,7 +355,12 @@ namespace
 			const FString AssetName = Image.Name.IsEmpty()
 				? FString::Printf(TEXT("tex_%d"), TextureIndex)
 				: TextureAssetNameFor(Image.Name);
-			const FString FolderPath = PackagePath / KExtractedFolderName;
+			// ★モデルごとにサブフォルダを切る。切らないと同じフォルダに 2 体取り込んだとき
+			//   "tex_0" や「顔」のような汎用名が衝突し、1 体目のテクスチャを 2 体目が上書きする。
+			const FString SubFolder = ExtractedSubFolderFor(GlbPath);
+			const FString FolderPath = SubFolder.IsEmpty()
+				? PackagePath / KExtractedFolderName
+				: PackagePath / KExtractedFolderName / SubFolder;
 			const FString PackageName = FolderPath / AssetName;
 
 			UPackage* Package = CreatePackage(*PackageName);
@@ -413,9 +447,10 @@ namespace
 //   この組はエクスポーター自身が「見た目ほぼ不透明」と分類したものなので採らなかった。
 //   本当に柔らかさが要る透け髪は alphaClass=="blend" 側 (Translucent) に来る。
 // ===========================================================================
-UTexture2D* FMmdMaterialConversion::FindImportedTextureByImageName(const FString& ImageName, const FString& PackagePath)
+UTexture2D* FMmdMaterialConversion::FindImportedTextureByImageName(const FString& ImageName, const FString& PackagePath,
+	const FString& GlbPath)
 {
-	return FindImportedTexture(ImageName, PackagePath);
+	return FindImportedTexture(ImageName, PackagePath, ExtractedSubFolderFor(GlbPath));
 }
 
 bool FMmdMaterialConversion::HasSoftAlpha(UTexture2D* Tex)
