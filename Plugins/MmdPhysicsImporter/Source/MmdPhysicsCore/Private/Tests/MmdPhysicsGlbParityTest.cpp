@@ -5,8 +5,18 @@
 // 実モデルの GLB は再配布できないため、テストデータは環境変数で外から与える。
 // 変数が無ければテストは何もせず成功する (データを持たない環境で赤くしないため)。
 //
-//   MMD_PARITY_GLB     … mmd2gltf-gui が出力した .glb
-//   MMD_PARITY_CSV     … Tools/CsReference が出力した基準 CSV
+//   MMD_PARITY_GLB     … mmd2gltf-gui が出力した .glb (1 体)
+//   MMD_PARITY_CSV     … Tools/CsReference が出力した基準 CSV (1 体)
+//   MMD_PARITY_GLBS    … 複数モデル用。';' 区切り。**設定されていればこちらを優先**
+//   MMD_PARITY_CSVS    … 同上。GLBS と**同数・同順**にすること
+//
+// ★複数モデルで回すこと。1 体だけだと形状・ジョイント型・質量域が偏ったまま緑になる。
+//   複合テストなのでモデルごとに独立したケースとして出る:
+//     MMD_PARITY_GLBS="A.glb;B.glb"  MMD_PARITY_CSVS="a.csv;b.csv"
+//
+// ★複数指定を MMD_PARITY_GLB に混ぜてはいけない。あれは ImportConvention / IdleSettle /
+//   MaterialReader / ChainStability / ConvertMaterials / WirePhysics も**単一パスとして**
+//   読んでいる共有の変数で、';' を入れると軒並み落ちる。だから末尾 S の別変数にしてある。
 //   MMD_PARITY_FRAMES  … ステップ数 (既定 60。CSV を作ったときと同じ値にすること)
 //   MMD_PARITY_TOL     … 位置の許容差 (PMX 単位。★既定 0 = ビット一致を要求する)
 //
@@ -150,18 +160,68 @@ namespace
 	}
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMmdPhysicsGlbParityTest, "MmdPhysics.Core.GlbParity",
+// ★複合テストにしてある。MMD_PARITY_GLB / MMD_PARITY_CSV を ';' 区切りで複数渡すと
+//   **モデルごとに独立したテストケース**として走り、どのモデルで落ちたかがそのまま出る。
+//   1 体しか渡さなければ従来と同じ (区切りが無ければ要素 1 のリストになる)。
+//   モデルを 1 体しか見ていないと、形状・ジョイント型・質量域が偏ったまま緑になる。
+IMPLEMENT_COMPLEX_AUTOMATION_TEST(FMmdPhysicsGlbParityTest, "MmdPhysics.Core.GlbParity",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+void FMmdPhysicsGlbParityTest::GetTests(TArray<FString>& OutBeautifiedNames, TArray<FString>& OutTestCommands) const
+{
+	// ★複数指定は専用の変数 (末尾 S) で受ける。
+	//   MMD_PARITY_GLB は ImportConvention / IdleSettle / MaterialReader / ChainStability /
+	//   ConvertMaterials / WirePhysics も**単一パスとして**読んでいる共有の変数なので、
+	//   ここを ';' 区切りにすると他のテストが壊れる (実際に IdleSettle と MaterialReader が落ちた)。
+	FString GlbEnv = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_PARITY_GLBS"));
+	FString CsvEnv = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_PARITY_CSVS"));
+	if (GlbEnv.IsEmpty() || CsvEnv.IsEmpty())
+	{
+		GlbEnv = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_PARITY_GLB"));
+		CsvEnv = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_PARITY_CSV"));
+	}
+
+	TArray<FString> Glbs, Csvs;
+	GlbEnv.ParseIntoArray(Glbs, TEXT(";"), true);
+	CsvEnv.ParseIntoArray(Csvs, TEXT(";"), true);
+
+	// 未設定・数が合わないときも 1 件は出す。RunTest 側がスキップかエラーを報告する
+	// (ここで 0 件にすると「テストが存在しない」扱いになり、取りこぼしに気付けない)。
+	if (Glbs.Num() == 0 || Glbs.Num() != Csvs.Num())
+	{
+		OutBeautifiedNames.Add(TEXT("Default"));
+		OutTestCommands.Add(FString());
+		return;
+	}
+
+	for (int32 i = 0; i < Glbs.Num(); i++)
+	{
+		// ★'.' はオートメーションの階層区切りなので置き換える。
+		//   "Tda式初音ミク・アペンド_Ver1.10" をそのまま渡すと "..._Ver1" と "10" に割れて、
+		//   テスト名が "10" として出る (実際にそうなった)。
+		OutBeautifiedNames.Add(FPaths::GetBaseFilename(Glbs[i]).Replace(TEXT("."), TEXT("_")));
+		OutTestCommands.Add(Glbs[i] + TEXT("|") + Csvs[i]);
+	}
+}
 
 bool FMmdPhysicsGlbParityTest::RunTest(const FString& Parameters)
 {
-	const FString GlbPath = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_PARITY_GLB"));
-	const FString CsvPath = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_PARITY_CSV"));
-	if (GlbPath.IsEmpty() || CsvPath.IsEmpty())
+	FString GlbPath, CsvPath;
+	if (!Parameters.Split(TEXT("|"), &GlbPath, &CsvPath))
 	{
-		AddInfo(TEXT("MMD_PARITY_GLB / MMD_PARITY_CSV が未設定のためスキップ (データ非同梱のため既定でスキップ)。"));
-		return true;
+		// GetTests が組を作れなかったとき。未設定ならスキップ、数違いならエラー。
+		const bool bPlural = !FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_PARITY_GLBS")).IsEmpty()
+			|| !FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_PARITY_CSVS")).IsEmpty();
+		if (!bPlural && (FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_PARITY_GLB")).IsEmpty()
+			|| FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_PARITY_CSV")).IsEmpty()))
+		{
+			AddInfo(TEXT("MMD_PARITY_GLB / MMD_PARITY_CSV が未設定のためスキップ (データ非同梱のため既定でスキップ)。"));
+			return true;
+		}
+		AddError(TEXT("GLB と CSV の件数が合いません (';' 区切りで同数にすること)。"));
+		return false;
 	}
+	AddInfo(FString::Printf(TEXT("モデル: %s"), *FPaths::GetCleanFilename(GlbPath)));
 
 	const FString FramesEnv = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_PARITY_FRAMES"));
 	const int32 Frames = FramesEnv.IsEmpty() ? 60 : FCString::Atoi(*FramesEnv);
