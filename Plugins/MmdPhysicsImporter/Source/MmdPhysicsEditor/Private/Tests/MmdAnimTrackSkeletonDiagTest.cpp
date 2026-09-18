@@ -26,6 +26,11 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+// ★ファイルごとの名前空間で囲む。unity build では複数の .cpp が 1 つにまとめてコンパイルされ、
+//   匿名名前空間の補助関数 (AppendU32LE など) が他のファイルと同名だと再定義エラーになる。
+namespace MmdPhysicsTests_MmdAnimTrackSkeletonDiagTest
+{
+
 using namespace MmdPhysics;
 
 namespace
@@ -130,5 +135,7 @@ bool FMmdAnimTrackSkeletonDiagTest::RunTest(const FString& Parameters)
 	AddInfo(FString::Printf(TEXT("指ボーンのトラック: %d 本: %s"), Fingers.Num(), *FString::Join(Fingers, TEXT(" "))));
 	return true;
 }
+
+} // namespace MmdPhysicsTests_MmdAnimTrackSkeletonDiagTest
 
 #endif // WITH_DEV_AUTOMATION_TESTS
