@@ -95,10 +95,12 @@ See [INSTALL.md](INSTALL.md).
 
 ## Usage
 
-1. Import the `.glb` with **UE's standard Interchange glTF importer** (the default path).
-   glTFRuntime, the deprecated legacy GLTFImporter, or an FBX detour will not match the coordinate system.
-2. Open **Tools → MMD Physics インポーター**
-3. Pick the skeletal mesh and the `.glb`, then press **"1. Wire / Re-wire Physics"**
+1. Open **Tools → MMD Physics インポーター**, pick the `.glb`, and press **"0. Import .glb"**
+   (under the hood this is UE's standard Interchange glTF importer; full-width digits in names are
+   converted to half-width right before import — see "Names in UE are half-width" below.
+   glTFRuntime, the deprecated legacy GLTFImporter, or an FBX detour will not match the coordinate system.)
+2. Check that the imported skeletal mesh is set as the target
+3. Press **"1. Wire / Re-wire Physics"**
 4. Then press **"2. Convert Materials to MMD Toon"**
 5. Then press **"3. Build Actor (body + animation + outline)"**
 6. Drop the resulting `BP_<MeshName>` into the level and play
@@ -116,6 +118,37 @@ BP_<MeshName>
    ├─ SoftPass  … the hair's second pass (soft tips). Added only if some material needs it
    └─ Outline   … outlines. Added only if some material draws one
 ```
+
+### Names in UE are half-width (the GLB keeps the original names)
+
+Bone names, animation track names, and morph curve names in UE use **half-width digits**
+(e.g. `右人指１` → `右人指1`). The same rule applies on Mac and Windows.
+
+- **The original `.glb` is never modified.** Right before import, a copy with only the names fixed is written to
+  `Saved/MmdPhysicsImporter/<Name>/<Name>.glb` and that copy is imported. The original is recorded as the import source
+- Physics, facial morphs, and bone movability flags can be matched from **either** the original (full-width)
+  name or the UE (half-width) name
+- If half-width conversion makes two names collide (e.g. both `右腕1` and `右腕１` exist), the import logs a warning
+  and assigns a unique name such as `右腕1_2`. A name that was already half-width keeps its name
+- **Why:** in UE 5.8 the AnimSequence runs bone and curve names through Control Rig's name check
+  (`URigHierarchy::SanitizeName`). Full-width digits fail that check **in every locale** and collapse to `_`,
+  so `右人指１`–`３` collide into one track and the rest are dropped (in IA, 28 finger tracks broke: 18 dropped and 10 collapsed into `右人指_`-style names)
+- Dragging the `.glb` straight into the Content Browser keeps the full-width names and breaks the finger motion
+  for the reason above. **Import through "0. Import .glb".**
+
+### On Mac, LC_CTYPE is switched at startup
+
+In the Mac editor the plugin **switches `LC_CTYPE` to `C.UTF-8` (falling back to `UTF-8`) at startup**
+(`#if PLATFORM_MAC && WITH_EDITOR`; packaged games and Windows are not affected).
+The result is logged once at startup (`[MmdPhysics] LC_CTYPE を 'C.UTF-8' にしました`).
+
+- **Why:** the name check above classifies characters with `iswalpha`, and under the Mac default (`C` locale)
+  kana and kanji are "not letters" and collapse to `_`. Switching only during import is not enough: the same check
+  also runs **every time an asset is loaded** (`RemoveBoneTracksMissingFromSkeleton`), which led to load-time errors
+  and an editor crash when editing curves
+- Only `LC_CTYPE` (character classification) is touched. Number formatting and parsing are unchanged
+- **Known side effect:** the engine's automation test `System::Core::Misc::Char` fails with
+  `Locale is "C.UTF-8" but should be "C"` (the test assumes the `C` locale)
 
 ### How motion (VMD) is handled
 
