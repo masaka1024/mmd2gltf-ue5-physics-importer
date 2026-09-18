@@ -8,6 +8,7 @@
 #include "Animation/Skeleton.h"
 #include "Misc/FileHelper.h"
 #include "MmdGlbPhysicsReader.h"
+#include "MmdNameNormalize.h"
 #include "MmdPhysicsCoreLog.h"
 
 #define LOCTEXT_NAMESPACE "MmdBoneTranslationFix"
@@ -172,6 +173,23 @@ FMmdTranslationFixResult FMmdBoneTranslationFix::Apply(UAnimSequence* Anim, cons
 	for (const FMmdGlbBone& B : Bones)
 	{
 		if (!B.Name.IsEmpty()) Known.Add(B.Name);
+	}
+
+	// ★トラック名は UE 名 (半角化・衝突の振り分け済み) なので、.glb の原本名のままでは
+	//   全角数字を含むボーン (指など) が「判定外」に落ちる。取り込みと同じ BuildUeNameMap で
+	//   UE 名も足しておく。原本名も残すのは、D&D で全角のまま取り込んだアニメでも当てるため。
+	{
+		TArray<FString> BoneNames;
+		for (const FMmdGlbBone& B : Bones) BoneNames.Add(B.Name);
+		const NameNormalize::FUeNameMap UeNames = NameNormalize::BuildUeNameMap(BoneNames, TEXT("ボーン"));
+		auto AddUeNames = [&UeNames](TSet<FString>& Set)
+		{
+			TArray<FString> Originals = Set.Array();
+			for (const FString& O : Originals) Set.Add(UeNames.ToUe(O));
+		};
+		AddUeNames(Known);
+		AddUeNames(Movable);
+		AddUeNames(PhysicsBaked);
 	}
 
 	IAnimationDataModel* Model = Anim->GetDataModel();

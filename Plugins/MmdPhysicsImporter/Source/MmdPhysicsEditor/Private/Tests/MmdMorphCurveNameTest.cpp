@@ -13,9 +13,19 @@
 //   なので ApplyMorphCurves は「サニタイズで名前が変わるモーフ」を足さない。
 //   このテストはその判定 (MakeRigSafeName) が MMD の実際のモーフ名で
 //   期待どおりに効くかを見る。詳しい経緯は MmdMorphAnimation.h の注記。
+//
+// ★★下の「仮名・漢字は通る」はロケールに依存する。
+//   FChar::IsAlpha の実体は iswalpha で、C ロケールでは非 ASCII に false を返す。
+//   UE 5.5 では通っていたが、5.8 の素の状態 (C ロケール) では落ちる。
+//   Mac のエディタは起動時に LC_CTYPE を UTF-8 へ上げ、取り込み時は
+//   ApplyMorphCurves / OnImportGlb が FMmdScopedUtf8CType でも上げている。
+//   このテストもスコープの中で判定を見る (どちらの経路でも取り込み時と同じ状態)。
+//   仮名の TestTrue が落ちたら、まず MmdPhysics.Locale.ScopedUtf8CType が
+//   通っているか (UTF-8 ロケールを適用できているか) を疑うこと。
 
 #include "Misc/AutomationTest.h"
 #include "MmdMorphAnimation.h"
+#include "MmdScopedUtf8CType.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -24,6 +34,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMmdMorphCurveNameTest, "MmdPhysics.Editor.Morp
 
 bool FMmdMorphCurveNameTest::RunTest(const FString& Parameters)
 {
+	// 取り込み時 (ApplyMorphCurves) と同じく、スレッドの LC_CTYPE を UTF-8 にして判定する。
+	FMmdScopedUtf8CType Utf8CType;
+
 	auto IsSafe = [](const TCHAR* Name)
 	{
 		return FMmdMorphAnimation::MakeRigSafeName(FString(Name)) == FString(Name);

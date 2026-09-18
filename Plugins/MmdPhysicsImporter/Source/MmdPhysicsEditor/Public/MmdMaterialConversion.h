@@ -213,7 +213,12 @@ public:
 	 * glTF の画像名 ("眼球４.bmp") から、取り込み済みのテクスチャアセットを探す。
 	 * 変換が使うのと同じ探索経路。検証側から同じ材料を組み立て直すために公開している。
 	 */
-	static UTexture2D* FindImportedTextureByImageName(const FString& ImageName, const FString& PackagePath);
+	/**
+	 * @param GlbPath 抽出テクスチャはモデルごとのサブフォルダ (.glb 名) に置かれるので、
+	 *                そこも探すために渡す。省略すると旧来の平置きだけを見る。
+	 */
+	static UTexture2D* FindImportedTextureByImageName(const FString& ImageName, const FString& PackagePath,
+		const FString& GlbPath = FString());
 
 	/**
 	 * そのテクスチャを「色」として読めるか (sRGB が入っていて、RGB が圧縮で落ちていないか)。

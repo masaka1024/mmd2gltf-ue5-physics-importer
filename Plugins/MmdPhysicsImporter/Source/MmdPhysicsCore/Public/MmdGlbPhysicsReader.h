@@ -45,6 +45,20 @@ namespace MmdPhysics
 		// マテリアル読み取り (GlbMaterialReader) からも使うので公開している。
 		static bool ParseGlb(const TArray<uint8>& d, TSharedPtr<MmdJsonValue>& OutRoot, TArray<uint8>& OutBin, TArray<FString>& OutWarnings);
 
+		/**
+		 * JSON チャンクだけを残した最小の GLB を作る (BIN チャンクを落とす)。
+		 *
+		 * ★用途: パッケージしたビルドへ物理データを同梱するため。
+		 *   .glb は UAsset ではないのでクックされず、絶対パスも配布先には存在しない。
+		 *   物理に要る extras.mmd とボーン階層 (nodes/skins) は**すべて JSON チャンク側**にあり、
+		 *   BIN (メッシュ/テクスチャ) は BuildModel が一切参照しない。落として構わない。
+		 *
+		 * ★JSON のバイト列は元の GLB からそのまま複写する (再エンコードしない)。
+		 *   パースし直して書き戻すと浮動小数の丸めで値が変わりうるため。
+		 *   出力は通常の GLB として ParseGlb / LoadBytes がそのまま読める。
+		 */
+		static bool ExtractJsonChunkGlb(const TArray<uint8>& Glb, TArray<uint8>& OutMinimalGlb, TArray<FString>& OutWarnings);
+
 		// accessor(FLOAT)を BIN から読み出す (bufferView.byteOffset + accessor.byteOffset)。
 		// モーフアニメーションの読み取り (MmdMorphAnimation) からも使うので公開している。
 		// ※componentType は見ない (呼び出し側で FLOAT=5126 を確かめること)。

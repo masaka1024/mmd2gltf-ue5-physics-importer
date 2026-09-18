@@ -40,7 +40,7 @@ public class MmdPhysicsEditor : ModuleRules
 			// インポーターウィンドウ (アセット選択欄とファイル選択ダイアログ)。
 			// マスターマテリアルのノードグラフをプログラムで組み立てる。
 			"MaterialEditor",
-			// マテリアルのコンパイル結果 (GMaxRHIFeatureLevel) を検査するのに必要。
+			// マテリアルのコンパイル結果 (GMaxRHIShaderPlatform) を検査するのに必要。
 			"RHI",
 			"PropertyEditor",
 			"DesktopPlatform",

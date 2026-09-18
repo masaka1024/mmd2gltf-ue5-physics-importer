@@ -15,6 +15,7 @@
 #include "Engine/SkeletalMesh.h"
 #include "ReferenceSkeleton.h"
 #include "MmdGlbPhysicsReader.h"
+#include "MmdNameNormalize.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -89,6 +90,11 @@ bool FMmdImportConventionTest::RunTest(const FString& Parameters)
 	}
 
 	// --- ボーン名の解決率 (日本語名が Interchange を通って残っているか) ---
+	// ★スケルトンのボーン名は UE 名 (全角数字を半角化・衝突は振り分け) なので、
+	//   原本名を取り込みと同じ規則 (BuildUeNameMap) で UE 名へ直してから引く。
+	//   原本名のまま引くと、指ボーン (`右人指１` 等) の 30 本が未解決に見える。
+	const MmdPhysics::NameNormalize::FUeNameMap UeNames =
+		MmdPhysics::NameNormalize::BuildUeNameMap(Model->BoneNames, TEXT("ボーン"));
 	const float S = UnitScale * 100.0f;
 	const int32 NumCandidates = UE_ARRAY_COUNT(GCandidates);
 	TArray<float> MaxErr; MaxErr.Init(0.0f, NumCandidates);
@@ -97,7 +103,7 @@ bool FMmdImportConventionTest::RunTest(const FString& Parameters)
 
 	for (int32 i = 0; i < Model->BoneNames.Num(); i++)
 	{
-		const int32 MeshBoneIndex = RefSkel.FindBoneIndex(FName(*Model->BoneNames[i]));
+		const int32 MeshBoneIndex = RefSkel.FindBoneIndex(FName(*UeNames.ToUe(Model->BoneNames[i])));
 		if (MeshBoneIndex == INDEX_NONE)
 		{
 			Unresolved.Add(Model->BoneNames[i]);

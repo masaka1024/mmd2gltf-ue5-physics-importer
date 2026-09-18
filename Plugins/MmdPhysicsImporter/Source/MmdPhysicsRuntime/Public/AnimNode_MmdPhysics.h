@@ -28,8 +28,22 @@ struct MMDPHYSICSRUNTIME_API FAnimNode_MmdPhysics : public FAnimNode_SkeletalCon
 	// --- 入力 ---
 
 	/**
+	 * 物理データ (剛体・ジョイント・ボーン階層) のアセット。**GlbPath より優先する。**
+	 *
+	 * ★パッケージしたビルドで物理を動かすにはこちらが必須。
+	 *   .glb は UAsset ではないのでクックされず、GlbPath の絶対パスは配布先に存在しない。
+	 *   このアセットはシーン (Anim Blueprint) から参照されるのでビルドへ同梱される。
+	 *   「物理を配線 / 再配線」を実行すると .glb から自動で作られて割り当たる。
+	 */
+	UPROPERTY(EditAnywhere, Category = "Source")
+	TObjectPtr<class UMmdPhysicsData> PhysicsData;
+
+	/**
 	 * mmd2gltf-gui が出力した .glb の絶対パス。extras.mmd から剛体とジョイントを読む。
 	 * 一般の glTF エクスポータの出力には extras.mmd が無いので動作しない。
+	 *
+	 * ★エディタでの確認用のフォールバックであり、**パッケージしたビルドでは機能しない**
+	 *   (.glb はクックされず、絶対パスも配布先には無い)。PhysicsData を使うこと。
 	 */
 	UPROPERTY(EditAnywhere, Category = "Source")
 	FString GlbPath;

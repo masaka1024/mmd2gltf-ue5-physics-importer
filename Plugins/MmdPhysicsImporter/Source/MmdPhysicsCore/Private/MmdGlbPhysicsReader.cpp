@@ -149,6 +149,71 @@ namespace MmdPhysics
 		return true;
 	}
 
+	bool GlbPhysicsReader::ExtractJsonChunkGlb(const TArray<uint8>& Glb, TArray<uint8>& OutMinimalGlb,
+		TArray<FString>& OutWarnings)
+	{
+		OutMinimalGlb.Reset();
+		if (Glb.Num() < 12)
+		{
+			OutWarnings.Add(TEXT("GLB が短すぎる (ヘッダに満たない)"));
+			return false;
+		}
+		if (ReadU32LE(Glb, 0) != 0x46546C67)
+		{
+			OutWarnings.Add(TEXT("GLB マジックが不正 (glTF ではない)"));
+			return false;
+		}
+
+		// JSON チャンクの位置と長さを探す。ParseGlb と同じ走査だが、
+		// ここでは中身を解釈せずバイト列のまま取り出す。
+		int32 JsonOffset = INDEX_NONE;
+		int32 JsonLen = 0;
+		int32 off = 12;
+		while (off + 8 <= Glb.Num())
+		{
+			const int32 clen = static_cast<int32>(ReadU32LE(Glb, off));
+			const uint32 ctype = ReadU32LE(Glb, off + 4);
+			const int32 cdata = off + 8;
+			if (clen < 0 || cdata + clen > Glb.Num()) break; // 壊れたチャンク長で範囲外を読まない
+			if (ctype == 0x4E4F534A)   // "JSON"
+			{
+				JsonOffset = cdata;
+				JsonLen = clen;
+				break;                 // glTF 2.0 では JSON チャンクは先頭の 1 つだけ
+			}
+			off = cdata + clen;
+			if ((clen & 3) != 0) off += 4 - (clen & 3);
+		}
+		if (JsonOffset == INDEX_NONE)
+		{
+			OutWarnings.Add(TEXT("GLB に JSON チャンクが無い"));
+			return false;
+		}
+
+		// glTF 2.0 のチャンクは 4 バイト境界に揃える。JSON の詰め物は空白 (0x20)。
+		const int32 Pad = (4 - (JsonLen & 3)) & 3;
+		const int32 Total = 12 + 8 + JsonLen + Pad;
+
+		OutMinimalGlb.SetNumUninitialized(Total);
+		uint8* P = OutMinimalGlb.GetData();
+		auto WriteU32 = [](uint8* Dst, uint32 V)
+		{
+			Dst[0] = static_cast<uint8>(V & 0xFF);
+			Dst[1] = static_cast<uint8>((V >> 8) & 0xFF);
+			Dst[2] = static_cast<uint8>((V >> 16) & 0xFF);
+			Dst[3] = static_cast<uint8>((V >> 24) & 0xFF);
+		};
+		WriteU32(P + 0, 0x46546C67);                      // magic "glTF"
+		WriteU32(P + 4, 2);                               // version
+		WriteU32(P + 8, static_cast<uint32>(Total));      // total length
+		WriteU32(P + 12, static_cast<uint32>(JsonLen + Pad));
+		WriteU32(P + 16, 0x4E4F534A);                     // "JSON"
+		FMemory::Memcpy(P + 20, Glb.GetData() + JsonOffset, JsonLen);
+		for (int32 i = 0; i < Pad; i++) P[20 + JsonLen + i] = 0x20;
+
+		return true;
+	}
+
 	Vec3 GlbPhysicsReader::ComputeWorld(int32 i, int32 nb, const TArray<int32>& Parent, const TArray<Vec3>& LocalRaw,
 		TArray<TOptional<Vec3>>& World)
 	{
