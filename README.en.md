@@ -150,6 +150,45 @@ The result is logged once at startup (`[MmdPhysics] LC_CTYPE を 'C.UTF-8' に�
 - **Known side effect:** the engine's automation test `System::Core::Misc::Char` fails with
   `Locale is "C.UTF-8" but should be "C"` (the test assumes the `C` locale)
 
+### Import destination and overwriting
+
+"0. Import .glb" imports the `.glb` into **`/Game/<FileName>/`**
+(UE 5.8's default glTF pipeline sorts assets into `SkeletalMeshes` / `Materials` / `Textures` subfolders).
+The mesh is `<FileName>`, the skeleton `<FileName>_Skeleton`, and the animation `<FileName>_Anim`.
+
+- **If the destination already has assets, you are asked whether to overwrite them.** Cancelling changes nothing.
+  Different models with the same file name (e.g. two `model.glb` files from different folders) land in the same place,
+  so watch out for overwrites
+- **If a legacy skeleton with full-width digits in its bone names is found, the import stops without overwriting**
+  ("旧形式のアセットです。削除してから取り込み直してください" — legacy asset; delete it and import again).
+  Overwriting would leave the old bone names behind. Delete the destination folder and import again
+- **Assets imported with the old "0." button must be deleted by hand.** The old version imported them into
+  `/Game/<Name>/<Name>_ue/` under the name `<Name>_ue`. The current version imports into `/Game/<Name>/`,
+  so nothing is overwritten, but the old copies stay around as duplicates
+- **If you turn off the subfolder settings of the glTF import, assets are placed directly under `/Game`.**
+  Their names then collide easily with other models' materials and textures, and the overwrite check above
+  (which looks at `/Game/<FileName>/`) no longer applies. Keep the defaults
+
+### Console command `MmdPhysics.ImportPipeline`
+
+```
+MmdPhysics.ImportPipeline <absolute path to .glb> [-Force]
+```
+
+Runs "0. Import" → "1. Wire Physics" → "2. Convert Materials" → "3. Build Actor" in order and saves the result
+(use it from the Output Log console or via `-ExecCmds`).
+
+- **If the destination already has assets, it stops with a warning by default.** It overwrites only with `-Force`.
+  A legacy skeleton stops it even with `-Force`
+- **Only packages created or modified by this command are saved.** Unrelated assets that were already unsaved
+  before the command stay unsaved. The saved packages are listed in the log
+- What gets saved are the assets in `/Game/<FileName>/` (for IA: `<Name>`, `<Name>_Skeleton`, `<Name>_Anim`,
+  `<Name>_PhysicsAsset`, `<Name>_Physics`, `ABP_<Name>_MmdPhysics`, `BP_<Name>`, `MI_<Name>_*`). Depending on the model,
+  textures upgraded to BC7, textures extracted from the GLB, approximate toon ramps (`SharedToon/`), and the master
+  materials (`M_MmdToon`, etc.) are saved as well
+- If an asset in the destination was already unsaved before the command, it is not saved and a warning is logged
+  (the command may have changed it; check it before saving)
+
 ### How motion (VMD) is handled
 
 `mmd2gltf-gui` bakes the VMD into a **standard glTF animation** (Bezier interpolation evaluated,

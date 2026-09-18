@@ -8,6 +8,7 @@
 #include "MmdGlbImport.h"
 #include "Engine/SkeletalMesh.h"
 #include "EditorFramework/AssetImportData.h"
+#include "Misc/MessageDialog.h"
 #include "Misc/Paths.h"
 #include "DesktopPlatformModule.h"
 #include "IDesktopPlatform.h"
@@ -334,8 +335,36 @@ bool SMmdImporterWindow::CanImport() const
 
 FReply SMmdImporterWindow::OnImportGlb()
 {
+	// --- 取り込み先の事前確認 ---
+	// ★取り込み (Interchange) は確認なしで既存アセットを置き換えるので、ここで聞く。
+	//   旧形式 (全角数字のボーン名) のスケルトンは上書きでは直らないので、聞かずに止める。
+	const FMmdImportPrecheck Check = FMmdGlbImport::Precheck(FPaths::ConvertRelativePathToFull(GlbPath));
+	if (Check.State == FMmdImportPrecheck::EState::Legacy)
+	{
+		StatusText = Check.Message;
+		bStatusIsError = true;
+		return FReply::Handled();
+	}
+	if (Check.State == FMmdImportPrecheck::EState::Existing)
+	{
+		const FText Question = FText::Format(
+			L(TEXT("取り込み先 {0} に既存アセットが {1} 件あります。上書きしてよいですか?\n")
+			  TEXT("(同じ名前のメッシュ・スケルトン・アニメーション・マテリアル・テクスチャが置き換わります)"),
+			  TEXT("{0} already contains {1} assets. Overwrite them?\n")
+			  TEXT("(Meshes, skeletons, animations, materials and textures with the same names will be replaced.)")),
+			FText::FromString(Check.Folder), FText::AsNumber(Check.ExistingAssets.Num()));
+		if (FMessageDialog::Open(EAppMsgType::OkCancel, Question) != EAppReturnType::Ok)
+		{
+			StatusText = L(TEXT("取り込みを中止しました (既存アセットはそのままです)。"),
+				TEXT("Import cancelled (existing assets were left untouched).")).ToString();
+			bStatusIsError = false;
+			return FReply::Handled();
+		}
+	}
+
 	// 取り込みの本体は FMmdGlbImport (コンソールコマンド MmdPhysics.ImportPipeline と共通)。
-	const FMmdGlbImportResult R = FMmdGlbImport::Import(GlbPath);
+	// 上書きの可否はここまでで確認済み。
+	const FMmdGlbImportResult R = FMmdGlbImport::Import(GlbPath, /*bAllowOverwrite=*/true);
 	if (!R.bSuccess)
 	{
 		switch (R.Failure)
