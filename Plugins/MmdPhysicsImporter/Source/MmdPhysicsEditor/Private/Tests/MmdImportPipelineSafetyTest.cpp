@@ -13,6 +13,7 @@
 //   3. 全角数字のボーン名を持つ旧形式のスケルトンがあれば、上書きせずに中止する。
 
 #include "Misc/AutomationTest.h"
+#include "Misc/Char.h"
 #include "AssetImportTask.h"
 #include "AssetToolsModule.h"
 #include "HAL/PlatformMisc.h"
@@ -96,9 +97,29 @@ bool FMmdImportPipelineSafetyTest::RunTest(const FString& Parameters)
 		Task->bReplaceExisting = true;
 		Task->bAsync = false;
 		Task->bSave = false;
-		// 全角のまま取り込むので、指ボーンのコントロールが潰れて衝突するエラーが出る (再現したい症状そのもの)。
-		// 件数はモデル次第なので「1 回以上」で受ける。
-		AddExpectedError(TEXT("ボーン コントロールを追加できません"), EAutomationExpectedErrorFlags::Contains, 0);
+		// 全角のまま取り込むので、指ボーンのコントロールが潰れて衝突するエラーが**出る環境がある**。
+		//
+		// ★出るかどうかはプラットフォームで変わる。URigHierarchy::SanitizeName は
+		//   FChar::IsAlpha(C) || FChar::IsDigit(C) (= iswalpha / iswdigit) で通す文字を決める。
+		//   全角数字がそこを通らない環境 (macOS 実測) でだけ `右親指０/１/２_CONTROL` が
+		//   `右親指__CONTROL` へ潰れて衝突し、この警告が出る。
+		//   Windows (MSVC) は C ロケールのままでも全角数字を通すので衝突しない (実測)。
+		//
+		// ★AddExpectedError は「1 回以上出ること」を**必須**にする指定で、任意扱いにはできない
+		//   (AutomationTest.cpp: ExpectedNumberOfOccurrences == 0 かつ実発生 0 なら失敗)。
+		//   無条件に宣言すると、衝突しない環境では中身が全部通っていても
+		//   「期待したメッセージが出なかった」でテスト全体が赤くなる。
+		//   だから宣言自体を、症状の原因と同じ判定で条件付きにする。
+		const bool bFullWidthDigitSurvives =
+			FChar::IsAlpha(TCHAR(0xFF10)) || FChar::IsDigit(TCHAR(0xFF10)); // '０'
+		AddInfo(FString::Printf(TEXT("全角数字が Control Rig の名前検査を通るか: %s"),
+			bFullWidthDigitSurvives ? TEXT("通る (衝突しないので警告は出ない)")
+									: TEXT("通らない (衝突して警告が出る)")));
+		if (!bFullWidthDigitSurvives)
+		{
+			// 件数はモデル次第なので「1 回以上」で受ける。
+			AddExpectedError(TEXT("ボーン コントロールを追加できません"), EAutomationExpectedErrorFlags::Contains, 0);
+		}
 		FAssetToolsModule::GetModule().Get().ImportAssetTasks({ Task });
 
 		const FMmdImportPrecheck Legacy = FMmdGlbImport::PrecheckFolder(LegacyFolder);
