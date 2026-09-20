@@ -2,7 +2,7 @@
 
 ## 1. 前提
 
-- **Unreal Engine 5.5**
+- **Unreal Engine 5.8**（5.5 でも動きます。以下の例は `UE_5.8` で書いています）
 - **Visual Studio 2022** に以下が入っていること
   - ワークロード「C++ によるデスクトップ開発」
   - MSVC v143 ビルドツール（x64/x86）
@@ -45,7 +45,7 @@ mklink /J "<YourProject>\Plugins\MmdPhysicsImporter" "<このリポジトリ>\Pl
 コマンドラインで:
 
 ```
-& "C:\Program Files\Epic Games\UE_5.5\Engine\Build\BatchFiles\Build.bat" `
+& "C:\Program Files\Epic Games\UE_5.8\Engine\Build\BatchFiles\Build.bat" `
   <YourProject>Editor Win64 Development -Project="<...>\<YourProject>.uproject" -WaitMutex
 ```
 

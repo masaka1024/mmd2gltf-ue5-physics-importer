@@ -84,7 +84,7 @@ floating-point mode setting that was required to achieve this.
 
 ## Requirements
 
-- **Unreal Engine 5.5** (5.6 has source-level compatibility branches only — see "Supported versions")
+- **Unreal Engine 5.8** (5.5 also works; 5.6 / 5.7 have source-level compatibility branches only — see "Supported versions")
 - Visual Studio 2022 with the "Desktop development with C++" workload and a Windows SDK
 - A `.glb` produced by `mmd2gltf-gui` — output from generic glTF exporters will not work
   (no `extras.mmd`)
@@ -293,8 +293,15 @@ Derivation and measured validation: [docs/coordinate_transform.md](docs/coordina
 
 | | Status |
 |---|---|
-| UE 5.5 | Development and verification target. 20 automated tests green |
-| UE 5.6 | Source-level compatibility only. **Not verified on a real install** |
+| UE 5.8 | **Current verification target.** Built and tested on both macOS (Apple Silicon) and Windows. On Windows all 28 automated tests are green, and bit-exact parity with the C# reference is confirmed across 2 models × 3 solver configurations (default / driven / playback) |
+| UE 5.5 | Former development target. 20 automated tests green at the time |
+| UE 5.6 / 5.7 | Source-level compatibility only. **Not verified on a real install** |
+
+Whether Japanese bone and morph names survive Control Rig's name check
+(`FChar::IsAlpha` = `iswalpha`) depends on the platform. **On Mac the editor raises
+`LC_CTYPE` to UTF-8 at startup**; on Windows they pass even under the C locale, so
+nothing is done there (measured). Full-width digits (０-９) pass under no locale at
+all, so those are normalized to half-width at import time instead.
 
 ## Known limitations
 

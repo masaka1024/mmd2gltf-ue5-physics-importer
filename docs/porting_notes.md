@@ -997,7 +997,30 @@ UE は既定で C++ 例外が無効です。移植元がコンテナ不正時に
 基準 CSV を作る:
 
 ```
-dotnet run --project Tools/CsReference -c Release -- <glb> 300 Tools/CsReference/out/ia_300_cs.csv
+dotnet run --project Tools/CsReference -c Release -- <glb> <frames> <out.csv> [--per-frame] [--drive] [--playback]
+```
+
+| フラグ | 何が変わるか |
+|---|---|
+| （無し） | 最終フレームの全剛体姿勢だけを出す |
+| `--per-frame` | **毎フレーム**出す（ヘッダが `frame,` で始まる）。UE 側は形式を自動判別して毎フレーム突き合わせ、**最初にずれたフレーム**を報告する。切り分けが速いので既定でこちらを推奨 |
+| `--drive` | 式で決まる合成モーションで駆動する。駆動なしだけでは「毎フレーム kinematic ターゲットが更新される経路」を一度も比較できないため。アニメではないので取り込み経路は混ざらない |
+| `--playback` | コア既定（SubSteps=4 / 1/30 / jointIter=0 / split 両 false）ではなく**再生時の構成**（SubSteps=2 / 1/60 / jointIter=40 / maxcorr=30 / split 両 true）で回す |
+
+★**UE 側の実行時フラグと必ず揃えること。** 食い違うと当然落ちます。
+
+★**複数モデルで回すこと。** 1 体だけだと形状・ジョイント型・質量域が偏ったまま緑になります。
+
+3 構成 × 2 モデルを作る例:
+
+```powershell
+$ia = "<...>\IA.glb"; $tda = "<...>\Tda式初音ミク・アペンド_Ver1.10.glb"
+foreach ($m in @(@{n='ia';p=$ia}, @{n='tda';p=$tda})) {
+  foreach ($c in @(@{n='cs';f=@()}, @{n='drive';f=@('--drive')}, @{n='pb';f=@('--playback')})) {
+    dotnet run --project Tools/CsReference -c Release -- `
+      $m.p 60 "Tools\CsReference\out\$($m.n)_60_$($c.n)_pf.csv" --per-frame @($c.f)
+  }
+}
 ```
 
 ### テストの走らせ方
@@ -1006,10 +1029,21 @@ dotnet run --project Tools/CsReference -c Release -- <glb> 300 Tools/CsReference
 黙ってスキップするので、データを持たない環境でも suite は green になります。
 
 ```powershell
+# --- パリティ (複数モデル。GLBS/CSVS は同数・同順。単数形より優先される) ---
+$env:MMD_PARITY_GLBS   = "<...>\IA.glb;<...>\Tda式初音ミク・アペンド_Ver1.10.glb"
+$env:MMD_PARITY_CSVS   = "Tools\CsReference\out\ia_60_cs_pf.csv;Tools\CsReference\out\tda_60_cs_pf.csv"
+$env:MMD_PARITY_FRAMES = "60"            # 基準 CSV を作ったときと同じ値にする
+
+# --- 単数形。ImportConvention / IdleSettle / MaterialReader / ChainStability /
+#     ConvertMaterials / WirePhysics も**単一パスとして**読む共有の変数。
+#     ★';' を入れてはいけない (軒並み落ちる)。だから複数指定は末尾 S の別変数にしてある ---
 $env:MMD_PARITY_GLB    = "<...>\IA.glb"
-$env:MMD_PARITY_CSV    = "Tools\CsReference\out\ia_300_cs.csv"
-$env:MMD_PARITY_FRAMES = "300"
-$env:MMD_CONV_SKELMESH = "/Game/IA/IA"
+
+$env:MMD_CONV_SKELMESH     = "/Game/IA/SkeletalMeshes/IA.IA"
+$env:MMD_CONV_EXPECT_BONES = "179"       # 全数で縛るとき (省略可)
+$env:MMD_DIAG_ANIM         = "/Game/IA/SkeletalMeshes/IA_Anim.IA_Anim"
+$env:MMD_LOCALE_IMPORT_GLB = "<...>\IA.glb"
+$env:MMD_PIPELINE_GLB      = "<...>\IA.glb"   # ★取り込み先を上書き保存する
 # 近似トゥーンのアセット生成まで見るとき (指定したフォルダへ .uasset を書きます)
 $env:MMD_TOON_RAMP_PACKAGE = "/Game/MmdToonRampTest"
 
@@ -1018,13 +1052,30 @@ $env:MMD_TOON_RAMP_PACKAGE = "/Game/MmdToonRampTest"
   -unattended -nopause -nullrhi -nosplash -testexit="Automation Test Queue Empty"
 ```
 
+★`-ExecCmds` の区切りは **`,`**。`"... ; Quit"` と書いても分割されず、`; Quit` が
+そのまま引数の一部になります（実測: UE 5.8）。終了は上のように `-testexit` で待つか、
+`-ExecCmds="<cmd>,Quit"` と書いてください。
+
+★**パリティは 3 構成を回すこと。** 既定だけでは駆動経路と再生時の構成が未比較のまま残ります。
+`MMD_PARITY_CSVS` を対応する CSV に差し替えたうえで:
+
+| 実行 | 環境変数 | 使う CSV |
+|---|---|---|
+| 既定 | （無し） | `*_cs_pf.csv` |
+| 駆動あり | `MMD_PARITY_DRIVE=1` | `*_drive_pf.csv` |
+| 再生時ソルバ | `MMD_PARITY_PLAYBACK=1` | `*_pb_pf.csv` |
+
+★`MMD_PARITY_TOL` の既定は **0（ビット一致を要求）**です。1〜2 ULP の混入は接触が続く系で
+指数的に増幅し、60 フレームで 5.4e-01 まで開いた実測があります。環境差の調査で一時的に
+ゆるめたいときだけ指定してください。
+
 | テスト | 見ているもの |
 |---|---|
 | `MmdPhysics.Core.Math` | YXZ オイラー、XYZ 分解の往復、カプセル慣性マージン |
 | `MmdPhysics.Core.CollisionMask` | 非衝突グループのビット解釈（反転していないか） |
 | `MmdPhysics.Core.Equilibrium` | 拘束が保持され Baumgarte が余計なエネルギーを注いでいないか |
 | `MmdPhysics.Core.Pendulum` | 重力・並進ロック・減衰が機能しているか |
-| `MmdPhysics.Core.GlbParity` | **C# 版とビット一致するか**（実モデル 300 フレーム） |
+| `MmdPhysics.Core.GlbParity` | **C# 版とビット一致するか**（実モデル 60 フレーム、許容差 0）。複合テストなので**モデルごとに独立したケース**として出る。`MMD_PARITY_DRIVE` / `MMD_PARITY_PLAYBACK` で駆動経路・再生時ソルバまで見る。基準 CSV が毎フレーム形式なら**最初にずれたフレーム**を報告する。★`MMD_PARITY_CSV(S)` が未設定なら**黙ってスキップして緑になる**ので、走ったかどうかはログで確かめること |
 | `MmdPhysics.Core.Accumulator` | 固定刻みアキュムレータが積み残しを捨てて実時間へ復帰するか。**データ不要** |
 | `MmdPhysics.Core.IdleSettle` | 静止入力で揺れ物が収まるか（振れ幅・周波数・最大速度を剛体別に出す）。`MMD_PARITY_GLB` を使う。切り分け用に `MMD_IDLE_SECONDS` / `_FIXED_HZ` / `_SUBSTEPS` / `_ITER` / `_JOINTS_FIRST` / `_SPLIT` / `_JOINT_SPLIT` / `_GRAVITY` で設定を差し替えられる |
 | `MmdPhysics.Core.MaterialReader` | 各マテリアルの `extras.mmd` を読めているか |
@@ -1039,6 +1090,14 @@ $env:MMD_TOON_RAMP_PACKAGE = "/Game/MmdToonRampTest"
 | `MmdPhysics.Editor.WirePhysics` | 配線 → 評価 → 書き戻しが端から端まで通るか |
 | `MmdPhysics.Editor.ConvertMaterials` | 全スロットに MI が付くか、半透明にすべき材質だけが Translucent 親か、マスク閾値が `alphaCutoff` と一致するか、`origTexture` が無加工版へ差し替わっているか、輪郭線フラグが入っているか |
 | `MmdPhysics.Editor.BuildActor` | 生成した Blueprint に本体と輪郭線コンポーネントが入っているか、モーションが割り当たっているか（単発再生・ループ）、表情モーフのカーブが足されているか（名前がモーフターゲットと一致し、値が 0 のままでなく、作り直しても二重にならないこと）、作り直しても増殖しないか。★化けたカーブの掃除は手元のデータでは踏めないので、**化けた姿のカーブを 1 本その場で作ってから**消えることと実在のカーブを巻き添えにしないことを見る |
+| `MmdPhysics.Editor.BoneTranslationFlags` | 「translation を持って良いボーン」の判定。修正前の `mmd2gltf-gui`（`aa5cc7b` より前）が回転専用ボーンへ移動値を出していたのを参照ポーズへ戻すが、**戻して良いボーンを間違えると正当な並進（移動可ボーン・物理ベイク）まで殺す**ので判定を固定する。**データ不要** |
+| `MmdPhysics.Editor.GlbNameNormalize` | 取り込み用 `.glb` の半角化。直すのは**ボーン名とモーフ名の全角数字だけ**（マテリアル名も仮名・漢字も触らない）、BIN チャンクが 1 バイトも変わらないこと、半角化で名前がぶつかるなら一意な名前へ振り分けて続けること、`１` のようなエスケープ形式も拾うこと。**データ不要** |
+| `MmdPhysics.Editor.UeNameCollision` | 半角化で名前がぶつかるときの振り分け規則（元から半角の名前が優先、残りは `_2` `_3` …、既存の名前は避ける）。★規則が名前の**集合だけ**で決まり並び順に依存しないこと。取り込み側（Editor）と照合側（Runtime）が別々に同じ対応を作り直すため、ここが崩れると別のボーンと取り違える。**データ不要** |
+| `MmdPhysics.Bridge.UeNameGolden` | `NameNormalize::BuildUeNameMap` の正解表。★期待値はすべて**手で書いた表**で、関数の出力どうしを比べない。取り込みと照合が同じ関数を使うので、関数自体が間違っていると両側が同じ間違いで一致してしまい他のテストでは気付けない。**データ不要** |
+| `MmdPhysics.Locale.ScopedUtf8CType` | `FMmdScopedUtf8CType` のスコープ内で仮名・漢字が `iswalpha` を通ること、抜けたら元へ戻ること。**スコープ外の判定もログに出す**（`Outside scope: Japanese alpha = …`）ので、そのプラットフォームが素で日本語を通すかが分かる。**データ不要** |
+| `MmdPhysics.Editor.JapaneseTrackImport` | 日本語のボーン名・モーフ名が取り込みで脱落しないか。`SMmdImporterWindow::OnImportGlb` と同じ手順（半角化 → スコープ内で `ImportAssetTasks` → `ApplyMorphCurves`）で取り込んで確かめる。`MMD_LOCALE_IMPORT_GLB` が未設定ならスキップ |
+| `MmdPhysics.Editor.AnimTrackSkeletonDiag` | 取り込み済み `AnimSequence` のボーントラックとスケルトンの突き合わせ（診断用）。ロード時の `RemoveBoneTracksMissingFromSkeleton` が消そうとするトラックを、エンジンと同じ判定で列挙し、原本名・半角化後の名前・スケルトンに在るかを並べる。`MMD_DIAG_ANIM` が未設定ならスキップ |
+| `MmdPhysics.Editor.ImportPipelineSafety` | 取り込みパイプラインの安全確認。既存アセットがあれば許可なしでは中止すること、許可ありでも**自分が作成・変更したパッケージだけ**を保存すること（開始前から未保存だった無関係のアセットは触らない）、全角数字のボーン名を持つ旧形式のスケルトンがあれば上書きせず中止すること。★**取り込み先を上書き保存する**ので `MMD_PIPELINE_GLB` が未設定ならスキップ |
 
 ### 自動化していない部分
 
