@@ -766,9 +766,8 @@ UMaterial* FMmdMaterialConversion::EnsureMasterMaterial(const FString& PackagePa
 	//   その状態のまま保存されていないとパッケージ後に色が出ない。
 	//   MMD モデルは表情モーフを持つので bUsedWithMorphTargets も同時に立てる。
 	{
-		bool bNeedsRecompile = false;
-		Mat->SetMaterialUsage(bNeedsRecompile, MATUSAGE_SkeletalMesh);
-		Mat->SetMaterialUsage(bNeedsRecompile, MATUSAGE_MorphTargets);
+		Mat->SetMaterialUsage(MATUSAGE_SkeletalMesh);
+		Mat->SetMaterialUsage(MATUSAGE_MorphTargets);
 	}
 
 	// --- パラメータ ---
@@ -1036,7 +1035,7 @@ UMaterial* FMmdMaterialConversion::EnsureMasterMaterial(const FString& PackagePa
 	//   差し替わるだけなので、目視でしか気付けない。ここで落として原因を名指しする。
 	//   (実例: ビュー空間法線 float3 を UV(float2) へ繋いで
 	//    「Cannot cast from larger type float3 to smaller type float2」)
-	if (const FMaterialResource* Res = Mat->GetMaterialResource(GMaxRHIFeatureLevel))
+	if (const FMaterialResource* Res = Mat->GetMaterialResource(GMaxRHIShaderPlatform))
 	{
 		const TArray<FString>& Errors = Res->GetCompileErrors();
 		if (Errors.Num() > 0)
@@ -1116,9 +1115,8 @@ UMaterial* FMmdMaterialConversion::EnsureOutlineMaterial(const FString& PackageP
 	Mat->BlendMode = BLEND_Translucent;
 	Mat->TwoSided = true;   // 裏面を描くので必須
 	{
-		bool bNeedsRecompile = false;
-		Mat->SetMaterialUsage(bNeedsRecompile, MATUSAGE_SkeletalMesh);
-		Mat->SetMaterialUsage(bNeedsRecompile, MATUSAGE_MorphTargets);
+		Mat->SetMaterialUsage(MATUSAGE_SkeletalMesh);
+		Mat->SetMaterialUsage(MATUSAGE_MorphTargets);
 	}
 
 	auto* EdgeColor = MakeNode<UMaterialExpressionVectorParameter>(Mat, -600, 0);
@@ -1185,7 +1183,7 @@ UMaterial* FMmdMaterialConversion::EnsureOutlineMaterial(const FString& PackageP
 
 	UMaterialEditingLibrary::RecompileMaterial(Mat);
 
-	if (const FMaterialResource* Res = Mat->GetMaterialResource(GMaxRHIFeatureLevel))
+	if (const FMaterialResource* Res = Mat->GetMaterialResource(GMaxRHIShaderPlatform))
 	{
 		const TArray<FString>& Errors = Res->GetCompileErrors();
 		if (Errors.Num() > 0)

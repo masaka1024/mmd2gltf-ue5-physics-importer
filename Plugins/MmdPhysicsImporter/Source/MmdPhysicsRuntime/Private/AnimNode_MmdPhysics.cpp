@@ -2,6 +2,7 @@
 
 #include "AnimNode_MmdPhysics.h"
 #include "MmdUeSpace.h"
+#include "MmdNameNormalize.h"
 #include "MmdGlbPhysicsReader.h"
 #include "MmdPhysicsDataAsset.h"
 #include "MmdPhysicsCoreLog.h"
@@ -159,6 +160,63 @@ void FAnimNode_MmdPhysics::InitializeBoneReferences(const FBoneContainer& Requir
 	}
 }
 
+namespace
+{
+	/**
+	 * extras.mmd のボーン名から、UE のスケルトン上のボーン番号を引く。
+	 *
+	 * ★照合の経路をここ 1 つにまとめてある。以前は ResolveBones と
+	 *   CheckImportConvention が同じ引き方を別々に書いていた。片方にだけ
+	 *   引き方を足すと、検査の方が黙ってボーンを取りこぼす
+	 *   (「179 本を照合」が「149 本」に減っていても気付きにくい)。
+	 *   引き方を増やすときは必ずここだけを直すこと。
+	 */
+	int32 FindBoneIndexForPmxName(const FReferenceSkeleton& RefSkel, const FString& PmxName,
+		const NameNormalize::FUeNameMap& UeNames)
+	{
+		// 1) FName での完全一致 (FName は大文字小文字を区別しない)。
+		int32 MeshBoneIndex = RefSkel.FindBoneIndex(FName(*PmxName));
+		if (MeshBoneIndex != INDEX_NONE) return MeshBoneIndex;
+
+		// 2) 大小文字を区別する線形探索。Interchange が名前をサニタイズしたり、
+		//    重複時にサフィックスを付けたりする可能性があるため。
+		//    ★採用する名前は必ず RefSkeleton 側のもの。
+		for (int32 b = 0; b < RefSkel.GetNum(); b++)
+		{
+			if (RefSkel.GetBoneName(b).ToString().Equals(PmxName, ESearchCase::CaseSensitive))
+			{
+				return b;
+			}
+		}
+
+		// 3) UE 名 (半角化・衝突の振り分け済み) へ直してから 1) 2) をもう一度。
+		//    ★取り込みは半角化した複製から行う (MmdGlbNameNormalize) ので、
+		//      スケルトンのボーンは `右人指1` になっている。一方 extras.mmd を
+		//      読む .glb は**原本 (全角) のままでよい**設計なので、名前がここでずれる。
+		//      原本を参照させたままにしているのは、複製が Saved/ の中間物で
+		//      消えうるのと、インポート元として原本を指しておく方が筋が通るため。
+		//      ★単純な半角化ではなく取り込みと同じ BuildUeNameMap の対応を使う。
+		//        半角化で衝突して `H_2` へ振り分けられたボーンを別のボーンと取り違えないため。
+		//      全角数字が UE のサニタイズを通せない理由は MmdNameNormalize.h を参照。
+		const FString HalfWidth = UeNames.ToUe(PmxName);
+		if (!HalfWidth.Equals(PmxName, ESearchCase::CaseSensitive))
+		{
+			MeshBoneIndex = RefSkel.FindBoneIndex(FName(*HalfWidth));
+			if (MeshBoneIndex != INDEX_NONE) return MeshBoneIndex;
+
+			for (int32 b = 0; b < RefSkel.GetNum(); b++)
+			{
+				if (RefSkel.GetBoneName(b).ToString().Equals(HalfWidth, ESearchCase::CaseSensitive))
+				{
+					return b;
+				}
+			}
+		}
+
+		return INDEX_NONE;
+	}
+}
+
 void FAnimNode_MmdPhysics::ResolveBones(const FBoneContainer& RequiredBones)
 {
 	const FReferenceSkeleton& RefSkel = RequiredBones.GetReferenceSkeleton();
@@ -167,29 +225,16 @@ void FAnimNode_MmdPhysics::ResolveBones(const FBoneContainer& RequiredBones)
 	PmxBoneToCompact.Reset();
 	PmxBoneToCompact.Init(FCompactPoseBoneIndex(INDEX_NONE), NumPmxBones);
 
+	// 取り込み時と同じ規則で UE 名を作り直す (名前の集合だけで決まる)。
+	const NameNormalize::FUeNameMap UeNames = NameNormalize::BuildUeNameMap(Model->BoneNames, TEXT("ボーン"));
+
 	int32 Resolved = 0;
 	TArray<FString> Unresolved;
 	for (int32 i = 0; i < NumPmxBones; i++)
 	{
 		const FString& PmxName = Model->BoneNames[i];
 
-		// 1) FName での完全一致 (FName は大文字小文字を区別しない)。
-		int32 MeshBoneIndex = RefSkel.FindBoneIndex(FName(*PmxName));
-
-		// 2) 見つからなければ大小文字を区別する線形探索でフォールバックする。
-		//    Interchange が日本語ボーン名をサニタイズしたり、重複時にサフィックスを
-		//    付けたりする可能性があるため。★採用する名前は必ず RefSkeleton 側のもの。
-		if (MeshBoneIndex == INDEX_NONE)
-		{
-			for (int32 b = 0; b < RefSkel.GetNum(); b++)
-			{
-				if (RefSkel.GetBoneName(b).ToString().Equals(PmxName, ESearchCase::CaseSensitive))
-				{
-					MeshBoneIndex = b;
-					break;
-				}
-			}
-		}
+		const int32 MeshBoneIndex = FindBoneIndexForPmxName(RefSkel, PmxName, UeNames);
 
 		if (MeshBoneIndex == INDEX_NONE)
 		{
@@ -239,11 +284,12 @@ void FAnimNode_MmdPhysics::CheckImportConvention(const FBoneContainer& RequiredB
 	TArray<float> MaxErr;
 	MaxErr.Init(0.0f, NumCandidates);
 	int32 Compared = 0;
+	const NameNormalize::FUeNameMap UeNames = NameNormalize::BuildUeNameMap(Model->BoneNames, TEXT("ボーン"));
 
 	for (int32 i = 0; i < Model->BonePositions.Num(); i++)
 	{
 		const FString& PmxName = Model->BoneNames[i];
-		const int32 MeshBoneIndex = RefSkel.FindBoneIndex(FName(*PmxName));
+		const int32 MeshBoneIndex = FindBoneIndexForPmxName(RefSkel, PmxName, UeNames);
 		if (MeshBoneIndex == INDEX_NONE) continue;
 		const FVector Actual = RefCS[MeshBoneIndex].GetLocation();
 		Compared++;

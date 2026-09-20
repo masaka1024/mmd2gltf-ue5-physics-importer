@@ -5,7 +5,11 @@
 #include "MmdActorBuilder.h"
 #include "MmdPhysicsWiring.h"
 #include "MmdMaterialConversion.h"
+#include "MmdGlbImport.h"
 #include "Engine/SkeletalMesh.h"
+#include "EditorFramework/AssetImportData.h"
+#include "Misc/MessageDialog.h"
+#include "Misc/Paths.h"
 #include "DesktopPlatformModule.h"
 #include "IDesktopPlatform.h"
 #include "PropertyCustomizationHelpers.h"
@@ -61,7 +65,8 @@ void SMmdImporterWindow::Construct(const FArguments& InArgs)
 			+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 2)
 			[
 				SNew(STextBlock)
-				.Text_Lambda([this]() { return L(TEXT(".glb (mmd2gltf-gui の出力)"), TEXT(".glb (output of mmd2gltf-gui)")); })
+				.Text_Lambda([this]() { return L(TEXT(".glb (mmd2gltf-gui の出力) ― メッシュから自動入力"),
+					TEXT(".glb (output of mmd2gltf-gui) - auto-filled from the mesh")); })
 			]
 			+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
 			[
@@ -78,6 +83,41 @@ void SMmdImporterWindow::Construct(const FArguments& InArgs)
 					.Text(LOCTEXT("Browse", "..."))
 					.OnClicked(this, &SMmdImporterWindow::OnBrowseGlb)
 				]
+			]
+
+			// --- 【0】.glb を取り込む ---
+			+ SVerticalBox::Slot().AutoHeight().Padding(0, 8, 0, 4)
+			[
+				SNew(SButton)
+				.HAlign(HAlign_Center)
+				.IsEnabled(this, &SMmdImporterWindow::CanImport)
+				.OnClicked(this, &SMmdImporterWindow::OnImportGlb)
+				[
+					SNew(STextBlock)
+					.Text_Lambda([this]()
+					{
+						return L(TEXT("0. .glb を取り込む"), TEXT("0. Import .glb"));
+					})
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
+			[
+				SNew(STextBlock)
+				.AutoWrapText(true)
+				.Text_Lambda([this]()
+				{
+					return L(
+						TEXT("UE へ直接ドラッグせず、ここから取り込んでください。")
+						TEXT("PMX の指ボーン (右人指１ など) は名前に全角数字を含み、そのまま取り込むと")
+						TEXT("UE の名前規則で潰れて衝突し、アニメーションのトラックが捨てられます。")
+						TEXT("ここでは取り込む直前に全角数字を半角へ直した複製を作って食わせます。")
+						TEXT("原本の .glb は書き換えません。"),
+						TEXT("Import from here instead of dragging the .glb into UE. ")
+						TEXT("PMX finger bones (e.g. 右人指１) contain full-width digits; importing them as-is ")
+						TEXT("collapses the names under UE's naming rules, they collide, and the animation tracks are dropped. ")
+						TEXT("This button imports a copy whose full-width digits have been made half-width. ")
+						TEXT("The original .glb is left untouched."));
+				})
 			]
 
 			// --- 【1】物理を配線 ---
@@ -217,6 +257,56 @@ FString SMmdImporterWindow::GetMeshPath() const
 void SMmdImporterWindow::OnMeshChanged(const FAssetData& AssetData)
 {
 	TargetMesh = Cast<USkeletalMesh>(AssetData.GetAsset());
+	AutoFillGlbPathFromMesh();
+}
+
+void SMmdImporterWindow::AutoFillGlbPathFromMesh()
+{
+	GlbPath.Empty();
+
+	const USkeletalMesh* Mesh = TargetMesh.Get();
+	if (Mesh == nullptr)
+	{
+		StatusText.Empty();
+		return;
+	}
+
+	// ★取り込み時の元ファイルはメッシュ自身が憶えているので、ここから拾う。
+	//   Interchange の UInterchangeAssetImportData も UAssetImportData 派生なので
+	//   glTF 取り込み (通常の経路) でも同じように取れる。
+	TArray<FString> Filenames;
+	if (const UAssetImportData* ImportData = Mesh->GetAssetImportData())
+	{
+		ImportData->ExtractFilenames(Filenames);
+	}
+
+	for (const FString& Filename : Filenames)
+	{
+		// ★.gltf (JSON + 外部 .bin) は GlbPhysicsReader が未対応なので拾わない。
+		//   拾ってしまうと「指定はできたのに読めない」という分かりにくい失敗になる。
+		if (!FPaths::GetExtension(Filename).Equals(TEXT("glb"), ESearchCase::IgnoreCase))
+		{
+			continue;
+		}
+
+		const FString FullPath = FPaths::ConvertRelativePathToFull(Filename);
+		if (FPaths::FileExists(FullPath))
+		{
+			GlbPath = FullPath;
+			StatusText = L(TEXT("インポート元の .glb を自動で見つけました。"),
+				TEXT("Found the source .glb automatically.")).ToString()
+				+ TEXT("\n") + FullPath;
+			bStatusIsError = false;
+			return;
+		}
+	}
+
+	// 元ファイルが無い / 移動した / .glb 以外から取り込んだ場合。手動で選んでもらう。
+	StatusText = L(
+		TEXT("インポート元の .glb が見つかりませんでした (移動・削除された可能性があります)。下の [...] から選んでください。"),
+		TEXT("Could not find the source .glb (it may have been moved or deleted). Pick it with [...] below."))
+		.ToString();
+	bStatusIsError = false;
 }
 
 FReply SMmdImporterWindow::OnBrowseGlb()
@@ -235,6 +325,80 @@ FReply SMmdImporterWindow::OnBrowseGlb()
 	{
 		GlbPath = FPaths::ConvertRelativePathToFull(Files[0]);
 	}
+	return FReply::Handled();
+}
+
+bool SMmdImporterWindow::CanImport() const
+{
+	return !GlbPath.IsEmpty();
+}
+
+FReply SMmdImporterWindow::OnImportGlb()
+{
+	// --- 取り込み先の事前確認 ---
+	// ★取り込み (Interchange) は確認なしで既存アセットを置き換えるので、ここで聞く。
+	//   旧形式 (全角数字のボーン名) のスケルトンは上書きでは直らないので、聞かずに止める。
+	const FMmdImportPrecheck Check = FMmdGlbImport::Precheck(FPaths::ConvertRelativePathToFull(GlbPath));
+	if (Check.State == FMmdImportPrecheck::EState::Legacy)
+	{
+		StatusText = Check.Message;
+		bStatusIsError = true;
+		return FReply::Handled();
+	}
+	if (Check.State == FMmdImportPrecheck::EState::Existing)
+	{
+		const FText Question = FText::Format(
+			L(TEXT("取り込み先 {0} に既存アセットが {1} 件あります。上書きしてよいですか?\n")
+			  TEXT("(同じ名前のメッシュ・スケルトン・アニメーション・マテリアル・テクスチャが置き換わります)"),
+			  TEXT("{0} already contains {1} assets. Overwrite them?\n")
+			  TEXT("(Meshes, skeletons, animations, materials and textures with the same names will be replaced.)")),
+			FText::FromString(Check.Folder), FText::AsNumber(Check.ExistingAssets.Num()));
+		if (FMessageDialog::Open(EAppMsgType::OkCancel, Question) != EAppReturnType::Ok)
+		{
+			StatusText = L(TEXT("取り込みを中止しました (既存アセットはそのままです)。"),
+				TEXT("Import cancelled (existing assets were left untouched).")).ToString();
+			bStatusIsError = false;
+			return FReply::Handled();
+		}
+	}
+
+	// 取り込みの本体は FMmdGlbImport (コンソールコマンド MmdPhysics.ImportPipeline と共通)。
+	// 上書きの可否はここまでで確認済み。
+	const FMmdGlbImportResult R = FMmdGlbImport::Import(GlbPath, /*bAllowOverwrite=*/true);
+	if (!R.bSuccess)
+	{
+		switch (R.Failure)
+		{
+		case FMmdGlbImportResult::EFailure::NotFound:
+			StatusText = L(TEXT(".glb が見つかりません。"), TEXT("The .glb was not found.")).ToString()
+				+ TEXT(" ") + R.SourcePath;
+			break;
+		case FMmdGlbImportResult::EFailure::NoMesh:
+			StatusText = L(TEXT("取り込みでスケルタルメッシュができませんでした。出力ログを確認してください。"),
+				TEXT("The import produced no skeletal mesh. Check the output log.")).ToString();
+			break;
+		default:
+			StatusText = R.Message;
+			break;
+		}
+		bStatusIsError = true;
+		return FReply::Handled();
+	}
+
+	TargetMesh = R.Mesh;
+	GlbPath = R.SourcePath;
+
+	StatusText = FString::Printf(TEXT("%s: %s  /  %s"),
+		*L(TEXT("取り込み"), TEXT("Imported")).ToString(),
+		*R.Mesh->GetName(),
+		*R.NormalizeMessage);
+	// ★半角化で名前がぶつかったものは一意な名前へ振り分けて取り込んだ。
+	//   黙って別名にすると気付けないので、何をどう振り分けたかを並べる (警告ログにも出ている)。
+	for (const FString& Collision : R.Collisions)
+	{
+		StatusText += TEXT("\n  ") + Collision;
+	}
+	bStatusIsError = false;
 	return FReply::Handled();
 }
 

@@ -1,6 +1,7 @@
 // Copyright (c) 2026 masaka1024. MIT License.
 
 #include "MmdMorphAnimation.h"
+#include "MmdNameNormalize.h"
 
 #include "Animation/AnimCurveMetadata.h"
 #include "Animation/AnimData/IAnimationDataController.h"
@@ -13,6 +14,7 @@
 #include "MmdGlbPhysicsReader.h"
 #include "MmdMiniJson.h"
 #include "MmdPhysicsCoreLog.h"
+#include "MmdScopedUtf8CType.h"
 
 #define LOCTEXT_NAMESPACE "MmdMorphAnimation"
 
@@ -117,7 +119,10 @@ FString FMmdMorphAnimation::MakeRigSafeName(const FString& In)
 	for (int32 Index = 0; Index < Out.Len(); Index++)
 	{
 		TCHAR& C = Out[Index];
-		const bool bGoodChar = FChar::IsAlpha(C)                          // 文字 (仮名・漢字も通る)
+		// ★IsAlpha の実体は iswalpha で、仮名・漢字が通るかは LC_CTYPE 次第。
+		//   C ロケールだと非 ASCII は全部 '_' に潰れる (UE 5.8 の素の状態)。
+		//   呼び出し側 (ApplyMorphCurves) が FMmdScopedUtf8CType で上げている。
+		const bool bGoodChar = FChar::IsAlpha(C)                          // 文字 (ロケール次第で仮名・漢字も通る)
 			|| FChar::IsDigit(C)                                          // 0-9
 			|| C == TEXT('_') || C == TEXT('-') || C == TEXT('.') || C == TEXT('|')
 			|| (Index > 0 && C == TEXT(' '));                             // 空白は 2 文字目以降のみ
@@ -154,6 +159,13 @@ FMmdMorphAnimResult FMmdMorphAnimation::ApplyMorphCurves(USkeletalMesh* Mesh, UA
 		Result.Message = TEXT("メッシュかアニメーションが指定されていません。");
 		return Result;
 	}
+
+	// ★カーブの追加は Control Rig の SanitizeName (iswalpha) を通り、MakeRigSafeName も
+	//   同じ判定で除外を決める。日本語のモーフ名を「文字」と判定させるため、
+	//   この関数の間だけスレッドの LC_CTYPE を UTF-8 にする
+	//   (Mac のエディタは起動時に上げてあるので、ここは Windows 向けの保険)。
+	//   下の FScopedBracket より先に作るので、ブラケットを閉じるときの通知まで覆う。
+	FMmdScopedUtf8CType Utf8CType;
 
 	TArray<uint8> Bytes;
 	if (!FFileHelper::LoadFileToArray(Bytes, *GlbPath))
@@ -195,11 +207,31 @@ FMmdMorphAnimResult FMmdMorphAnimation::ApplyMorphCurves(USkeletalMesh* Mesh, UA
 		return Result;
 	}
 
-	const TArray<FString> TargetNames = ReadTargetNames(Root, MeshIndex);
+	TArray<FString> TargetNames = ReadTargetNames(Root, MeshIndex);
 	if (TargetNames.Num() == 0)
 	{
 		Result.Message = TEXT("mesh.extras.targetNames がありません (モーフ名を決められません)。");
 		return Result;
+	}
+
+	// ★取り込みの経路によってモーフ名の全角数字が半角になっている。
+	//   プラグインの取り込みは半角化した複製から行う (MmdGlbNameNormalize) が、
+	//   ここで読んでいる .glb は原本 (全角) のままでよい設計なので、綴りがずれる。
+	//   素の名前で当たらず UE 名なら当たる場合だけ差し替える。こうしておけば
+	//   D&D で直接取り込んだ (= 全角のままの) メッシュでもそのまま当たる。
+	//   ★UE 名は取り込みと同じ BuildUeNameMap で作る。半角化で衝突して `H_2` へ
+	//     振り分けられたモーフを、別のモーフ `H` と取り違えないため。
+	const NameNormalize::FUeNameMap UeNames = NameNormalize::BuildUeNameMap(TargetNames, TEXT("モーフ"));
+	for (FString& Name : TargetNames)
+	{
+		const FString UeName = UeNames.ToUe(Name);
+		if (UeName.Equals(Name, ESearchCase::CaseSensitive)) continue;
+		if (Mesh->FindMorphTarget(FName(*Name)) != nullptr) continue;
+
+		if (Mesh->FindMorphTarget(FName(*UeName)) != nullptr)
+		{
+			Name = UeName;
+		}
 	}
 	Result.TotalTracks = TargetNames.Num();
 

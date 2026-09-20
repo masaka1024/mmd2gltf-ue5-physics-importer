@@ -26,7 +26,29 @@ private:
 	FString GetMeshPath() const;
 	void OnMeshChanged(const FAssetData& AssetData);
 
+	/**
+	 * TargetMesh のインポート元 .glb を AssetImportData から拾って GlbPath に入れる。
+	 * 見つからなければ空にする (前のメッシュのパスが残って別モデルに当たるのを防ぐ)。
+	 */
+	void AutoFillGlbPathFromMesh();
+
 	FReply OnBrowseGlb();
+
+	/**
+	 * 【0】.glb を取り込む。
+	 *
+	 * ★UE へ直接 D&D せずここから取り込む理由。
+	 *   PMX の指ボーン `右人指１` などは名前に全角数字を含み、そのままだと
+	 *   URigHierarchy::SanitizeName で `右人指_` に潰れて衝突し、衝突した分の
+	 *   アニメーショントラックが取り込みで捨てられる (IA で 54 本中 18 本が脱落)。
+	 *   全角数字は iswalpha も iswdigit も通らず、ロケールでもエンジン側の
+	 *   判定式でも救えない (MmdNameNormalize.h)。
+	 *   そこで**取り込む直前に半角へ直した複製を作り、それを食わせる**。
+	 *   原本 .glb は書き換えないし、エクスポーターも直さない。
+	 */
+	FReply OnImportGlb();
+	bool CanImport() const;
+
 	FReply OnWirePhysics();
 	FReply OnConvertMaterials();
 	FReply OnBuildActor();

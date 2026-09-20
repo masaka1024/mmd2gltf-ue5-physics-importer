@@ -5,7 +5,14 @@
 // 環境変数で対象を与える (未設定ならスキップ):
 //   MMD_PARITY_GLB       … mmd2gltf-gui が出力した .glb
 //   MMD_CONV_SKELMESH    … UE 標準の Interchange glTF で取り込んだ USkeletalMesh のパス
-//                          (例 /Game/IA/IA)
+//                          (例 /Game/IA/SkeletalMeshes/IA.IA)
+//   MMD_CONV_EXPECT_BONES … (任意) extras.mmd のボーン数。設定すると**全ボーンの解決**を必須にする
+//                          (IA では 179)。未設定なら「半数以上」の汎用基準で見る。
+//
+// ★全数の解決を必須にするのはモデルが分かっているときだけ。汎用の基準を「半数以上」に
+//   据え置いているのは、未知のモデルでは UE 側にしか無いボーン・取り込まれないボーンが
+//   ありうるため。IA のように全ボーンが通るはずのモデルでは、指の 30 本が落ちるような
+//   退行 (149/179) を「半数以上」では見逃すので、期待値を与えて厳しく見る。
 //
 // ★変換式はここに独立して書き下す。FMmdUeSpace を呼んでしまうと、
 //   実装が間違っていても同じ間違いで照合してしまい検証にならない。
@@ -15,8 +22,14 @@
 #include "Engine/SkeletalMesh.h"
 #include "ReferenceSkeleton.h"
 #include "MmdGlbPhysicsReader.h"
+#include "MmdNameNormalize.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
+
+// ★ファイルごとの名前空間で囲む。unity build では複数の .cpp が 1 つにまとめてコンパイルされ、
+//   匿名名前空間の補助関数 (AppendU32LE など) が他のファイルと同名だと再定義エラーになる。
+namespace MmdPhysicsTests_MmdImportConventionTest
+{
 
 using namespace MmdPhysics;
 
@@ -89,6 +102,11 @@ bool FMmdImportConventionTest::RunTest(const FString& Parameters)
 	}
 
 	// --- ボーン名の解決率 (日本語名が Interchange を通って残っているか) ---
+	// ★スケルトンのボーン名は UE 名 (全角数字を半角化・衝突は振り分け) なので、
+	//   原本名を取り込みと同じ規則 (BuildUeNameMap) で UE 名へ直してから引く。
+	//   原本名のまま引くと、指ボーン (`右人指１` 等) の 30 本が未解決に見える。
+	const MmdPhysics::NameNormalize::FUeNameMap UeNames =
+		MmdPhysics::NameNormalize::BuildUeNameMap(Model->BoneNames, TEXT("ボーン"));
 	const float S = UnitScale * 100.0f;
 	const int32 NumCandidates = UE_ARRAY_COUNT(GCandidates);
 	TArray<float> MaxErr; MaxErr.Init(0.0f, NumCandidates);
@@ -97,7 +115,7 @@ bool FMmdImportConventionTest::RunTest(const FString& Parameters)
 
 	for (int32 i = 0; i < Model->BoneNames.Num(); i++)
 	{
-		const int32 MeshBoneIndex = RefSkel.FindBoneIndex(FName(*Model->BoneNames[i]));
+		const int32 MeshBoneIndex = RefSkel.FindBoneIndex(FName(*UeNames.ToUe(Model->BoneNames[i])));
 		if (MeshBoneIndex == INDEX_NONE)
 		{
 			Unresolved.Add(Model->BoneNames[i]);
@@ -131,11 +149,22 @@ bool FMmdImportConventionTest::RunTest(const FString& Parameters)
 
 	// --- 判定 ---
 	TestTrue(TEXT("extras.mmd のボーン名がスケルトンに解決できる (半数以上)"), Matched * 2 >= Model->BoneNames.Num());
+
+	// モデルが分かっているときは全数を必須にする (IA では 179)。
+	const FString ExpectEnv = FPlatformMisc::GetEnvironmentVariable(TEXT("MMD_CONV_EXPECT_BONES"));
+	if (!ExpectEnv.IsEmpty())
+	{
+		const int32 Expected = FCString::Atoi(*ExpectEnv);
+		TestEqual(TEXT("extras.mmd のボーン数が期待どおり (MMD_CONV_EXPECT_BONES)"), Model->BoneNames.Num(), Expected);
+		TestEqual(TEXT("全ボーンがスケルトンに解決できる (MMD_CONV_EXPECT_BONES)"), Matched, Expected);
+	}
 	TestEqual(TEXT("最も一致する取り込み経路が UE 標準の Interchange glTF である"),
 		FString(GCandidates[Best].Name), FString(GCandidates[0].Name));
 	TestTrue(FString::Printf(TEXT("参照ポーズとの最大差が小さい (%.4f cm <= 1.0 cm)"), MaxErr[0]), MaxErr[0] <= 1.0f);
 
 	return true;
 }
+
+} // namespace MmdPhysicsTests_MmdImportConventionTest
 
 #endif // WITH_DEV_AUTOMATION_TESTS
